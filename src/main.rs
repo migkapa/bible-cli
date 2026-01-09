@@ -1,3 +1,4 @@
+mod ai;
 mod books;
 mod cache;
 mod cli;
