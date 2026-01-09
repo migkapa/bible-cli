@@ -26,5 +26,6 @@ fn main() -> Result<()> {
         Commands::Random => commands::run_random(&paths, &output),
         Commands::Echo(args) => commands::run_echo(args, &paths, &output),
         Commands::Mood(args) => commands::run_mood(args, &paths, &output),
+        Commands::Ai(args) => commands::run_ai(args, &paths, &output),
     }
 }

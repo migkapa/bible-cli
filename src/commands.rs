@@ -2,10 +2,11 @@ use anyhow::{bail, Context, Result};
 use chrono::{Datelike, Local};
 use rand::seq::SliceRandom;
 use rand::thread_rng;
+use serde::{Deserialize, Serialize};
 
 use crate::books::normalize_book;
 use crate::cache::{preload_kjv, read_manifest, CachePaths};
-use crate::cli::{CacheArgs, EchoArgs, MoodArgs, ReadArgs, SearchArgs};
+use crate::cli::{AiArgs, CacheArgs, EchoArgs, MoodArgs, ReadArgs, SearchArgs};
 use crate::moods::{all_moods, find_mood};
 use crate::output::OutputStyle;
 use crate::reference::{parse_reference, ReferenceQuery};
@@ -175,6 +176,24 @@ pub fn run_mood(args: &MoodArgs, paths: &CachePaths, output: &OutputStyle) -> Re
     Ok(())
 }
 
+pub fn run_ai(args: &AiArgs, paths: &CachePaths, output: &OutputStyle) -> Result<()> {
+    let reference = parse_reference(&args.reference)?;
+    let verses = load_verses(&paths.verses_path)
+        .context("KJV not cached. Run `bible cache --preload`.")?;
+
+    let selected = select_ai_verses(&verses, &reference, args.window)?;
+    let prompt = build_ai_prompt(&selected);
+    let response = call_provider(args, &prompt)?;
+
+    for verse in &selected {
+        println!("{}", output.verse_line(verse));
+    }
+    println!();
+    println!("{}", response.trim());
+
+    Ok(())
+}
+
 fn print_book_overview(verses: &[Verse], reference: &ReferenceQuery) -> Result<()> {
     let Some(max_chapter) = max_chapter(verses, &reference.book) else {
         bail!("Book not found: {}", reference.book);
@@ -221,4 +240,129 @@ fn daily_prompt(seed: usize) -> &'static str {
         "Read it twice, slowly. What changes?",
     ];
     PROMPTS[seed % PROMPTS.len()]
+}
+
+fn select_ai_verses<'a>(
+    verses: &'a [Verse],
+    reference: &ReferenceQuery,
+    window: u16,
+) -> Result<Vec<&'a Verse>> {
+    let chapter = reference
+        .chapter
+        .ok_or_else(|| anyhow::anyhow!("Chapter is required for AI prompts"))?;
+
+    let mut chapter_verses: Vec<&Verse> = verses
+        .iter()
+        .filter(|v| v.book == reference.book && v.chapter == chapter)
+        .collect();
+    if chapter_verses.is_empty() {
+        bail!("No verses found for {} {}", reference.book, chapter);
+    }
+    chapter_verses.sort_by_key(|v| v.verse);
+
+    let Some(verse_number) = reference.verse else {
+        return Ok(chapter_verses);
+    };
+
+    let position = chapter_verses
+        .iter()
+        .position(|v| v.verse == verse_number)
+        .ok_or_else(|| anyhow::anyhow!("Verse not found"))?;
+
+    let window = window as usize;
+    let start = position.saturating_sub(window);
+    let end = (position + window).min(chapter_verses.len() - 1);
+
+    Ok(chapter_verses[start..=end].to_vec())
+}
+
+fn build_ai_prompt(selected: &[&Verse]) -> String {
+    let mut prompt = String::from(
+        "You are a helpful assistant. Provide a concise reflection on the passage below.\n\n",
+    );
+    prompt.push_str("Passage:\n");
+    for verse in selected {
+        let line = format!(
+            "{} {}:{} {}\n",
+            verse.book, verse.chapter, verse.verse, verse.text
+        );
+        prompt.push_str(&line);
+    }
+    prompt.push_str("\nResponse:");
+    prompt
+}
+
+fn call_provider(args: &AiArgs, prompt: &str) -> Result<String> {
+    match args.provider.to_lowercase().as_str() {
+        "openai" => call_openai(args, prompt),
+        provider => bail!("Unknown provider: {}", provider),
+    }
+}
+
+fn call_openai(args: &AiArgs, prompt: &str) -> Result<String> {
+    let api_key = std::env::var("OPENAI_API_KEY")
+        .context("OPENAI_API_KEY is required for the OpenAI provider")?;
+    let client = reqwest::blocking::Client::new();
+    let request = OpenAiRequest {
+        model: &args.model,
+        messages: vec![
+            OpenAiMessage {
+                role: "system",
+                content: "You are a thoughtful Bible assistant.",
+            },
+            OpenAiMessage {
+                role: "user",
+                content: prompt,
+            },
+        ],
+        max_tokens: args.max_tokens,
+        temperature: args.temperature,
+    };
+
+    let response = client
+        .post("https://api.openai.com/v1/chat/completions")
+        .bearer_auth(api_key)
+        .json(&request)
+        .send()
+        .context("Failed to call OpenAI")?
+        .error_for_status()
+        .context("OpenAI returned an error")?;
+
+    let body: OpenAiResponse = response.json().context("Invalid OpenAI response")?;
+    let content = body
+        .choices
+        .into_iter()
+        .next()
+        .and_then(|choice| choice.message.content)
+        .ok_or_else(|| anyhow::anyhow!("OpenAI response missing content"))?;
+    Ok(content)
+}
+
+#[derive(Serialize)]
+struct OpenAiRequest<'a> {
+    model: &'a str,
+    messages: Vec<OpenAiMessage<'a>>,
+    max_tokens: u32,
+    temperature: f32,
+}
+
+#[derive(Serialize)]
+struct OpenAiMessage<'a> {
+    role: &'a str,
+    content: &'a str,
+}
+
+#[derive(Deserialize)]
+struct OpenAiResponse {
+    choices: Vec<OpenAiChoice>,
+}
+
+#[derive(Deserialize)]
+struct OpenAiChoice {
+    message: OpenAiMessageResponse,
+}
+
+#[derive(Deserialize)]
+struct OpenAiMessageResponse {
+    content: Option<String>,
 }

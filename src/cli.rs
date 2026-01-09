@@ -23,6 +23,7 @@ pub enum Commands {
     Echo(EchoArgs),
     Mood(MoodArgs),
     Cache(CacheArgs),
+    Ai(AiArgs),
 }
 
 #[derive(Copy, Clone, Debug, ValueEnum)]
@@ -73,4 +74,25 @@ pub struct CacheArgs {
 
     #[arg(long)]
     pub source: Option<String>,
+}
+
+#[derive(Args)]
+pub struct AiArgs {
+    #[arg(required = true)]
+    pub reference: Vec<String>,
+
+    #[arg(long, default_value = "openai")]
+    pub provider: String,
+
+    #[arg(long, default_value = "gpt-4o-mini")]
+    pub model: String,
+
+    #[arg(long, default_value_t = 256)]
+    pub max_tokens: u32,
+
+    #[arg(long, default_value_t = 0.7)]
+    pub temperature: f32,
+
+    #[arg(long, default_value_t = 0)]
+    pub window: u16,
 }
