@@ -28,6 +28,27 @@ cargo install bible-cli
 - `bible mood <mood>` or `bible mood --list`
 - `bible cache [--preload] [--source <url-or-path>]`
 
+## AI
+
+Use the AI command to get short summaries or reflections for a specific verse.
+
+Example:
+
+```bash
+bible ai John 3 16 --provider openai --model gpt-4o-mini
+```
+
+Required environment variables (set at least one for the provider you use):
+
+- `OPENAI_API_KEY`
+- `ANTHROPIC_API_KEY`
+
+Notes:
+
+- Pick models based on your desired quality, speed, and cost; faster/smaller models are usually cheaper.
+- API usage may incur provider charges; check your provider pricing.
+- Requests are sent to the selected provider; avoid sharing sensitive data if you are concerned about privacy.
+
 ## Cache
 
 Defaults to `~/.bible-cli`. Override with `--data-dir <dir>`.
