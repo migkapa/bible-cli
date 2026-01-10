@@ -3,8 +3,66 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>bible-cli - Fast, playful Bible CLI</title>
-    <meta name="description" content="A fast, playful Bible CLI built in Rust. Read, search, and explore Scripture from your terminal with AI-powered reflections.">
+
+    <!-- Primary Meta Tags -->
+    <title>bible-cli - Fast Bible CLI for Your Terminal | Read, Search & AI Reflections</title>
+    <meta name="title" content="bible-cli - Fast Bible CLI for Your Terminal | Read, Search & AI Reflections">
+    <meta name="description" content="A fast, playful Bible command-line tool built in Rust. Read KJV Scripture, search verses, get daily readings, and explore passages with AI-powered reflections using OpenAI or Anthropic.">
+    <meta name="keywords" content="bible cli, command line bible, terminal bible, kjv bible, rust cli, bible search, daily verse, ai bible, scripture terminal, bible app developers">
+    <meta name="author" content="migkapa">
+    <meta name="robots" content="index, follow">
+    <link rel="canonical" href="https://migkapa.github.io/bible-cli/">
+
+    <!-- Open Graph / Facebook -->
+    <meta property="og:type" content="website">
+    <meta property="og:url" content="https://migkapa.github.io/bible-cli/">
+    <meta property="og:title" content="bible-cli - Fast Bible CLI for Your Terminal">
+    <meta property="og:description" content="Read, search, and explore Scripture from your terminal. AI-powered reflections with streaming responses. Built in Rust.">
+    <meta property="og:image" content="https://migkapa.github.io/bible-cli/og-image.png">
+    <meta property="og:image:width" content="1200">
+    <meta property="og:image:height" content="630">
+    <meta property="og:site_name" content="bible-cli">
+
+    <!-- Twitter -->
+    <meta name="twitter:card" content="summary_large_image">
+    <meta name="twitter:url" content="https://migkapa.github.io/bible-cli/">
+    <meta name="twitter:title" content="bible-cli - Fast Bible CLI for Your Terminal">
+    <meta name="twitter:description" content="Read, search, and explore Scripture from your terminal. AI-powered reflections with streaming responses. Built in Rust.">
+    <meta name="twitter:image" content="https://migkapa.github.io/bible-cli/og-image.png">
+
+    <!-- Structured Data -->
+    <script type="application/ld+json">
+    {
+        "@context": "https://schema.org",
+        "@type": "SoftwareApplication",
+        "name": "bible-cli",
+        "applicationCategory": "DeveloperApplication",
+        "operatingSystem": "Windows, macOS, Linux",
+        "description": "A fast, playful Bible command-line tool built in Rust. Read KJV Scripture, search verses, get daily readings, and explore passages with AI-powered reflections.",
+        "url": "https://migkapa.github.io/bible-cli/",
+        "downloadUrl": "https://crates.io/crates/bible-cli",
+        "softwareVersion": "0.2.0",
+        "author": {
+            "@type": "Person",
+            "name": "migkapa",
+            "url": "https://github.com/migkapa"
+        },
+        "offers": {
+            "@type": "Offer",
+            "price": "0",
+            "priceCurrency": "USD"
+        },
+        "aggregateRating": {
+            "@type": "AggregateRating",
+            "ratingValue": "5",
+            "ratingCount": "1"
+        }
+    }
+    </script>
+
+    <!-- Favicon -->
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>📖</text></svg>">
+
     <style>
         :root {
             --bg: #0d1117;
@@ -67,6 +125,10 @@
             justify-content: center;
             flex-wrap: wrap;
             margin-bottom: 32px;
+        }
+
+        .badges a {
+            display: inline-block;
         }
 
         .badges img {
@@ -238,6 +300,55 @@
             font-size: 0.95rem;
         }
 
+        /* AI Section */
+        .ai-section {
+            padding: 0 0 80px;
+        }
+
+        .ai-section h2 {
+            font-size: 1.75rem;
+            margin-bottom: 16px;
+            text-align: center;
+        }
+
+        .ai-section .subtitle {
+            text-align: center;
+            color: var(--text-muted);
+            margin-bottom: 32px;
+            max-width: 600px;
+            margin-left: auto;
+            margin-right: auto;
+        }
+
+        .ai-features {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 16px;
+        }
+
+        .ai-feature {
+            background: var(--bg-secondary);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            padding: 20px;
+            text-align: center;
+        }
+
+        .ai-feature .icon {
+            font-size: 2rem;
+            margin-bottom: 12px;
+        }
+
+        .ai-feature h4 {
+            font-size: 1rem;
+            margin-bottom: 8px;
+        }
+
+        .ai-feature p {
+            color: var(--text-muted);
+            font-size: 0.85rem;
+        }
+
         /* Footer */
         footer {
             border-top: 1px solid var(--border);
@@ -253,6 +364,14 @@
 
         footer a:hover {
             text-decoration: underline;
+        }
+
+        footer nav {
+            margin-bottom: 16px;
+        }
+
+        footer nav a {
+            margin: 0 12px;
         }
 
         /* Responsive */
@@ -274,7 +393,7 @@
                 padding: 48px 0 40px;
             }
 
-            .features, .demo, .commands {
+            .features, .demo, .commands, .ai-section {
                 padding: 48px 0;
             }
         }
@@ -286,8 +405,8 @@
             <h1>bible<span>-cli</span></h1>
             <p class="tagline">Fast, playful Bible CLI built in Rust</p>
             <div class="badges">
-                <a href="https://crates.io/crates/bible-cli"><img src="https://img.shields.io/crates/v/bible-cli.svg" alt="Crates.io"></a>
-                <a href="https://github.com/migkapa/bible-cli"><img src="https://img.shields.io/github/stars/migkapa/bible-cli?style=social" alt="GitHub stars"></a>
+                <a href="https://crates.io/crates/bible-cli" aria-label="View on Crates.io"><img src="https://img.shields.io/crates/v/bible-cli.svg" alt="Crates.io version badge"></a>
+                <a href="https://github.com/migkapa/bible-cli" aria-label="Star on GitHub"><img src="https://img.shields.io/github/stars/migkapa/bible-cli?style=social" alt="GitHub stars"></a>
             </div>
             <div class="install">
                 <code><span class="prompt">$ </span>cargo install bible-cli</code>
@@ -295,48 +414,49 @@
         </div>
     </header>
 
-    <section class="features">
-        <div class="container">
-            <h2>Features</h2>
-            <div class="feature-grid">
-                <div class="feature">
-                    <h3>Read Scripture</h3>
-                    <p>Quick access to any verse, chapter, or book in the King James Version.</p>
-                </div>
-                <div class="feature">
-                    <h3>Smart Search</h3>
-                    <p>Find verses by keyword with optional book filtering and result limits.</p>
-                </div>
-                <div class="feature">
-                    <h3>Daily Verse</h3>
-                    <p>Get a consistent verse each day with a reflection prompt to guide your reading.</p>
-                </div>
-                <div class="feature">
-                    <h3>Mood-Based</h3>
-                    <p>Find verses for peace, courage, wisdom, hope, or gratitude.</p>
-                </div>
-                <div class="feature">
-                    <h3>AI Reflections</h3>
-                    <p>Get thoughtful insights on passages using OpenAI or Anthropic with streaming responses.</p>
-                </div>
-                <div class="feature">
-                    <h3>Interactive Chat</h3>
-                    <p>Have a conversation about Scripture with real-time streaming and markdown rendering.</p>
+    <main>
+        <section class="features" aria-labelledby="features-heading">
+            <div class="container">
+                <h2 id="features-heading">Features</h2>
+                <div class="feature-grid">
+                    <article class="feature">
+                        <h3>Read Scripture</h3>
+                        <p>Quick access to any verse, chapter, or book in the King James Version Bible.</p>
+                    </article>
+                    <article class="feature">
+                        <h3>Smart Search</h3>
+                        <p>Find verses by keyword with optional book filtering and customizable result limits.</p>
+                    </article>
+                    <article class="feature">
+                        <h3>Daily Verse</h3>
+                        <p>Get a consistent verse each day with a reflection prompt to guide your reading.</p>
+                    </article>
+                    <article class="feature">
+                        <h3>Mood-Based Reading</h3>
+                        <p>Find curated verses for peace, courage, wisdom, hope, or gratitude.</p>
+                    </article>
+                    <article class="feature">
+                        <h3>AI Reflections</h3>
+                        <p>Get thoughtful insights on passages using OpenAI or Anthropic with real-time streaming.</p>
+                    </article>
+                    <article class="feature">
+                        <h3>Interactive Chat</h3>
+                        <p>Have a conversation about Scripture with streaming responses and markdown rendering.</p>
+                    </article>
                 </div>
             </div>
-        </div>
-    </section>
+        </section>
 
-    <section class="demo">
-        <div class="container">
-            <h2>See it in action</h2>
-            <div class="terminal">
-                <div class="terminal-header">
-                    <div class="terminal-dot red"></div>
-                    <div class="terminal-dot yellow"></div>
-                    <div class="terminal-dot green"></div>
-                </div>
-                <div class="terminal-body">
+        <section class="demo" aria-labelledby="demo-heading">
+            <div class="container">
+                <h2 id="demo-heading">See it in action</h2>
+                <div class="terminal" role="img" aria-label="Terminal demonstration of bible-cli commands">
+                    <div class="terminal-header">
+                        <div class="terminal-dot red"></div>
+                        <div class="terminal-dot yellow"></div>
+                        <div class="terminal-dot green"></div>
+                    </div>
+                    <div class="terminal-body">
 <span class="prompt">$</span> <span class="command">bible read John 3 16</span>
 <span class="cyan">John 3:16</span>  <span class="output">For God so loved the world, that he gave his only begotten Son, that whosoever believeth in him should not perish, but have everlasting life.</span>
 
@@ -353,54 +473,85 @@
 
 <span class="highlight">you></span> <span class="command">What does this verse teach about love?</span>
 <span class="output">This verse reveals the depth of divine love...</span>
+                    </div>
                 </div>
             </div>
-        </div>
-    </section>
+        </section>
 
-    <section class="commands">
-        <div class="container">
-            <h2>Commands</h2>
-            <div class="command-list">
-                <div class="command-item">
-                    <code>bible read &lt;book&gt; [chapter] [verse]</code>
-                    <span>Read a specific verse, chapter, or book overview</span>
-                </div>
-                <div class="command-item">
-                    <code>bible search &lt;query&gt;</code>
-                    <span>Search for verses containing a keyword</span>
-                </div>
-                <div class="command-item">
-                    <code>bible today</code>
-                    <span>Get today's verse with a reflection prompt</span>
-                </div>
-                <div class="command-item">
-                    <code>bible random</code>
-                    <span>Get a random verse from the Bible</span>
-                </div>
-                <div class="command-item">
-                    <code>bible mood &lt;mood&gt;</code>
-                    <span>Find verses for peace, courage, wisdom, hope, or gratitude</span>
-                </div>
-                <div class="command-item">
-                    <code>bible ai &lt;reference&gt; --chat</code>
-                    <span>Start an AI-powered conversation about a passage</span>
-                </div>
-                <div class="command-item">
-                    <code>bible cache --preload</code>
-                    <span>Download and cache the KJV Bible locally</span>
+        <section class="ai-section" aria-labelledby="ai-heading">
+            <div class="container">
+                <h2 id="ai-heading">AI-Powered Bible Study</h2>
+                <p class="subtitle">Explore Scripture with modern AI. Get reflections, ask questions, and dive deeper into passages with OpenAI or Anthropic.</p>
+                <div class="ai-features">
+                    <div class="ai-feature">
+                        <div class="icon" aria-hidden="true">⚡</div>
+                        <h4>Streaming Responses</h4>
+                        <p>See AI responses appear in real-time, token by token</p>
+                    </div>
+                    <div class="ai-feature">
+                        <div class="icon" aria-hidden="true">💭</div>
+                        <h4>Thinking Indicator</h4>
+                        <p>Animated spinner shows when AI is processing</p>
+                    </div>
+                    <div class="ai-feature">
+                        <div class="icon" aria-hidden="true">📝</div>
+                        <h4>Markdown Rendering</h4>
+                        <p>Formatted output with headers, lists, and code</p>
+                    </div>
+                    <div class="ai-feature">
+                        <div class="icon" aria-hidden="true">🔄</div>
+                        <h4>Multi-Provider</h4>
+                        <p>Switch between OpenAI and Anthropic on the fly</p>
+                    </div>
                 </div>
             </div>
-        </div>
-    </section>
+        </section>
+
+        <section class="commands" aria-labelledby="commands-heading">
+            <div class="container">
+                <h2 id="commands-heading">Command Reference</h2>
+                <div class="command-list" role="list">
+                    <div class="command-item" role="listitem">
+                        <code>bible read &lt;book&gt; [chapter] [verse]</code>
+                        <span>Read a specific verse, chapter, or book overview</span>
+                    </div>
+                    <div class="command-item" role="listitem">
+                        <code>bible search &lt;query&gt;</code>
+                        <span>Search for verses containing a keyword</span>
+                    </div>
+                    <div class="command-item" role="listitem">
+                        <code>bible today</code>
+                        <span>Get today's verse with a reflection prompt</span>
+                    </div>
+                    <div class="command-item" role="listitem">
+                        <code>bible random</code>
+                        <span>Get a random verse from the Bible</span>
+                    </div>
+                    <div class="command-item" role="listitem">
+                        <code>bible mood &lt;mood&gt;</code>
+                        <span>Find verses for peace, courage, wisdom, hope, or gratitude</span>
+                    </div>
+                    <div class="command-item" role="listitem">
+                        <code>bible ai &lt;reference&gt; --chat</code>
+                        <span>Start an AI-powered conversation about a passage</span>
+                    </div>
+                    <div class="command-item" role="listitem">
+                        <code>bible cache --preload</code>
+                        <span>Download and cache the KJV Bible locally</span>
+                    </div>
+                </div>
+            </div>
+        </section>
+    </main>
 
     <footer>
         <div class="container">
-            <p>
-                <a href="https://github.com/migkapa/bible-cli">GitHub</a> &middot;
-                <a href="https://crates.io/crates/bible-cli">Crates.io</a> &middot;
-                MIT / Apache-2.0
-            </p>
+            <nav aria-label="Footer navigation">
+                <a href="https://github.com/migkapa/bible-cli">GitHub</a>
+                <a href="https://crates.io/crates/bible-cli">Crates.io</a>
+                <a href="https://github.com/migkapa/bible-cli/issues">Issues</a>
+            </nav>
+            <p>Open source under MIT / Apache-2.0 license</p>
         </div>
     </footer>
 </body>
