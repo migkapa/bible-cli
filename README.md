@@ -15,6 +15,15 @@ cargo build
 
 ## Install
 
+**Homebrew (macOS/Linux)**
+
+```bash
+brew tap migkapa/tap
+brew install bible-cli
+```
+
+**Cargo**
+
 ```bash
 cargo install bible-cli
 ```
