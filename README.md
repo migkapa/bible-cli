@@ -1,5 +1,9 @@
 # bible-cli
 
+[![Crates.io](https://img.shields.io/crates/v/bible-cli.svg)](https://crates.io/crates/bible-cli)
+[![Downloads](https://img.shields.io/crates/d/bible-cli.svg)](https://crates.io/crates/bible-cli)
+[![Homebrew](https://img.shields.io/badge/homebrew-tap-orange)](https://github.com/migkapa/homebrew-tap)
+
 Fast, playful Bible CLI (KJV MVP). Built in Rust.
 
 ## Quick start
