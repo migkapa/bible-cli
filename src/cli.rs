@@ -95,4 +95,7 @@ pub struct AiArgs {
 
     #[arg(long, default_value_t = 0)]
     pub window: u16,
+
+    #[arg(long, help = "Start an interactive chat session with the selected passage")]
+    pub chat: bool,
 }

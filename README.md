@@ -10,6 +10,7 @@ cargo build
 ./target/debug/bible read John 3 16
 ./target/debug/bible today
 ./target/debug/bible mood peace
+./target/debug/bible ai John 3 16 --chat
 ```
 
 ## Install
@@ -27,15 +28,33 @@ cargo install bible-cli
 - `bible echo <book> <chapter> <verse> [--window N]`
 - `bible mood <mood>` or `bible mood --list`
 - `bible cache [--preload] [--source <url-or-path>]`
+- `bible ai <reference> [--chat]`
+
+Chat commands (with `--chat`): `/help`, `/model <name>`, `/provider <name>`, `/reset`, `/exit`.
 
 ## AI
 
 Use the AI command to get short summaries or reflections for a specific verse.
 
+Features:
+- **Streaming responses** - See responses appear token-by-token in real-time
+- **Thinking indicator** - Animated spinner while waiting for the AI
+- **Markdown rendering** - Formatted output with headers, lists, and code blocks
+- **Clean visuals** - Monochrome theme inspired by modern CLI tools
+
 Example:
 
 ```bash
 bible ai John 3 16 --provider openai --model gpt-4o-mini
+```
+
+Chat mode keeps a continuous conversation around the selected passage:
+
+```bash
+bible ai John 3 16 --chat
+# inside chat:
+/model gpt-4o-mini
+/provider anthropic
 ```
 
 Required environment variables (set at least one for the provider you use):

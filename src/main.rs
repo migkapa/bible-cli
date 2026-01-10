@@ -13,7 +13,8 @@ use clap::Parser;
 
 use crate::cli::Commands;
 
-fn main() -> Result<()> {
+#[tokio::main(flavor = "current_thread")]
+async fn main() -> Result<()> {
     let cli = cli::Cli::parse();
     let paths = cache::cache_paths(cli.data_dir.clone());
     let output = output::OutputStyle::new(cli.color);
@@ -26,6 +27,6 @@ fn main() -> Result<()> {
         Commands::Random => commands::run_random(&paths, &output),
         Commands::Echo(args) => commands::run_echo(args, &paths, &output),
         Commands::Mood(args) => commands::run_mood(args, &paths, &output),
-        Commands::Ai(args) => commands::run_ai(args, &paths, &output),
+        Commands::Ai(args) => commands::run_ai(args, &paths, &output).await,
     }
 }
