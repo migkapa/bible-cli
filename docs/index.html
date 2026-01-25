@@ -41,7 +41,7 @@
         "description": "A fast, playful Bible command-line tool built in Rust. Read KJV Scripture, search verses, get daily readings, and explore passages with AI-powered reflections.",
         "url": "https://migkapa.github.io/bible-cli/",
         "downloadUrl": "https://crates.io/crates/bible-cli",
-        "softwareVersion": "0.2.0",
+        "softwareVersion": "0.3.0",
         "author": {
             "@type": "Person",
             "name": "migkapa",
@@ -445,6 +445,10 @@
                         <h3>Interactive Chat</h3>
                         <p>Have a conversation about Scripture with streaming responses and markdown rendering.</p>
                     </article>
+                    <article class="feature">
+                        <h3>Full-Screen TUI</h3>
+                        <p>Browse the Bible in an interactive terminal interface with vim-style navigation.</p>
+                    </article>
                 </div>
             </div>
         </section>
@@ -509,6 +513,37 @@
             </div>
         </section>
 
+        <section class="demo" aria-labelledby="tui-heading">
+            <div class="container">
+                <h2 id="tui-heading">Interactive TUI Mode</h2>
+                <p style="text-align: center; color: var(--text-muted); margin-bottom: 32px;">Browse the Bible in a full-screen terminal interface with vim-style navigation</p>
+                <div class="terminal" role="img" aria-label="TUI mode demonstration">
+                    <div class="terminal-header">
+                        <div class="terminal-dot red"></div>
+                        <div class="terminal-dot yellow"></div>
+                        <div class="terminal-dot green"></div>
+                    </div>
+                    <div class="terminal-body">
+<span class="output">┌─ Books ─────────┬─ John 3 ──────────────────────────────────────┐</span>
+<span class="output">│</span> <span class="highlight">> Genesis</span>       <span class="output">│</span>                                               <span class="output">│</span>
+<span class="output">│</span>   Exodus        <span class="output">│</span>  <span class="cyan">1</span>  <span class="output">There was a man of the Pharisees, named</span>   <span class="output">│</span>
+<span class="output">│</span>   Leviticus     <span class="output">│</span>     <span class="output">Nicodemus, a ruler of the Jews:</span>           <span class="output">│</span>
+<span class="output">│</span>   ...           <span class="output">│</span>                                               <span class="output">│</span>
+<span class="output">│</span>   Matthew       <span class="output">│</span>  <span class="cyan">16</span> <span class="output">For God so loved the world, that he gave</span>  <span class="output">│</span>
+<span class="output">│</span>   Mark          <span class="output">│</span>     <span class="output">his only begotten Son, that whosoever</span>      <span class="output">│</span>
+<span class="output">│</span>   Luke          <span class="output">│</span>     <span class="output">believeth in him should not perish...</span>      <span class="output">│</span>
+<span class="output">│</span> <span class="highlight">> John</span>          <span class="output">│</span>                                               <span class="output">│</span>
+<span class="output">│</span>   Acts          <span class="output">│</span>                                               <span class="output">│</span>
+<span class="output">├─────────────────┤</span>                                               <span class="output">│</span>
+<span class="output">│</span> <span class="cyan">Ch 3/21</span> <span class="output">[n/p]</span>   <span class="output">│</span>                                               <span class="output">│</span>
+<span class="output">└─────────────────┴───────────────────────────────────────────────┘</span>
+ <span class="cyan">[READER]</span>  <span class="output">j/k:scroll  n/p:chapter  Tab:books  g/G:top/bottom  q:quit</span>
+                    </div>
+                </div>
+                <p style="text-align: center; color: var(--text-muted); margin-top: 24px; font-size: 0.9rem;">Launch with <code style="color: var(--accent);">bible tui</code> or <code style="color: var(--accent);">bible tui --book John</code></p>
+            </div>
+        </section>
+
         <section class="commands" aria-labelledby="commands-heading">
             <div class="container">
                 <h2 id="commands-heading">Command Reference</h2>
@@ -540,6 +575,10 @@
                     <div class="command-item" role="listitem">
                         <code>bible cache --preload</code>
                         <span>Download and cache the KJV Bible locally</span>
+                    </div>
+                    <div class="command-item" role="listitem">
+                        <code>bible tui</code>
+                        <span>Launch interactive full-screen Bible reader</span>
                     </div>
                 </div>
             </div>

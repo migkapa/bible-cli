@@ -15,6 +15,7 @@ cargo build
 ./target/debug/bible today
 ./target/debug/bible mood peace
 ./target/debug/bible ai John 3 16 --chat
+./target/debug/bible tui
 ```
 
 ## Install
@@ -42,6 +43,7 @@ cargo install bible-cli
 - `bible mood <mood>` or `bible mood --list`
 - `bible cache [--preload] [--source <url-or-path>]`
 - `bible ai <reference> [--chat]`
+- `bible tui [--book <book>]`
 
 Chat commands (with `--chat`): `/help`, `/model <name>`, `/provider <name>`, `/reset`, `/exit`.
 
@@ -80,6 +82,41 @@ Notes:
 - Pick models based on your desired quality, speed, and cost; faster/smaller models are usually cheaper.
 - API usage may incur provider charges; check your provider pricing.
 - Requests are sent to the selected provider; avoid sharing sensitive data if you are concerned about privacy.
+
+## Interactive TUI
+
+Launch a full-screen terminal interface for browsing the Bible:
+
+```bash
+bible tui
+bible tui --book John
+```
+
+```
+┌─ Books ─────────┬─ John 3 ──────────────────────────────────────┐
+│ > Genesis       │                                               │
+│   Exodus        │  1  There was a man of the Pharisees, named   │
+│   ...           │     Nicodemus, a ruler of the Jews:           │
+│ > John          │                                               │
+│   Acts          │  16 For God so loved the world, that he gave  │
+│   ...           │     his only begotten Son...                  │
+├─────────────────┤                                               │
+│ Ch 3/21 [n/p]   │                                               │
+└─────────────────┴───────────────────────────────────────────────┘
+ [READER]  j/k:scroll  n/p:chapter  Tab:books  g/G:top/bottom  q:quit
+```
+
+**Keybindings:**
+
+| Key | Action |
+|-----|--------|
+| `Tab` | Switch between Books/Reader mode |
+| `j`/`k` | Navigate list or scroll content |
+| `Enter` | Select book (in Books mode) |
+| `n`/`p` | Next/previous chapter |
+| `g`/`G` | Go to top/bottom |
+| `Ctrl-d`/`Ctrl-u` | Page down/up |
+| `q` | Quit |
 
 ## Cache
 
