@@ -24,6 +24,7 @@ pub enum Commands {
     Mood(MoodArgs),
     Cache(CacheArgs),
     Ai(AiArgs),
+    Tui(TuiArgs),
 }
 
 #[derive(Copy, Clone, Debug, ValueEnum)]
@@ -96,6 +97,22 @@ pub struct AiArgs {
     #[arg(long, default_value_t = 0)]
     pub window: u16,
 
-    #[arg(long, help = "Start an interactive chat session with the selected passage")]
+    #[arg(
+        long,
+        help = "Start an interactive chat session with the selected passage"
+    )]
     pub chat: bool,
+}
+
+#[derive(Args)]
+pub struct TuiArgs {
+    #[arg(long, help = "Start at a specific book")]
+    pub book: Option<String>,
+
+    #[arg(
+        long,
+        value_name = "REF",
+        help = "Start at a specific reference (e.g., 'John 3:16')"
+    )]
+    pub r#ref: Option<String>,
 }

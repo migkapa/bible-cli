@@ -91,8 +91,7 @@ fn read_source(source: &str) -> Result<String> {
     let trimmed = source.trim();
     if trimmed.starts_with("file://") {
         let path = trimmed.trim_start_matches("file://");
-        return fs::read_to_string(path)
-            .with_context(|| format!("Failed reading {}", path));
+        return fs::read_to_string(path).with_context(|| format!("Failed reading {}", path));
     }
 
     let path = Path::new(trimmed);
@@ -115,8 +114,8 @@ fn read_source(source: &str) -> Result<String> {
 }
 
 fn write_jsonl(path: &Path, verses: &[Verse]) -> Result<()> {
-    let mut file = fs::File::create(path)
-        .with_context(|| format!("Failed writing {}", path.display()))?;
+    let mut file =
+        fs::File::create(path).with_context(|| format!("Failed writing {}", path.display()))?;
     for verse in verses {
         let line = serde_json::to_string(verse)?;
         writeln!(file, "{}", line)?;
@@ -201,7 +200,9 @@ fn parse_array(arr: &[Value]) -> Result<Vec<Verse>> {
 fn parse_books(books: &[Value]) -> Result<Vec<Verse>> {
     let mut verses = Vec::new();
     for book_val in books {
-        let Some(book_obj) = book_val.as_object() else { continue };
+        let Some(book_obj) = book_val.as_object() else {
+            continue;
+        };
         let book_name = extract_string(book_obj, &["name", "book", "bookName", "book_name"])
             .unwrap_or_else(|| "Unknown".to_string());
         let normalized_book = normalize_book(&book_name)
@@ -214,7 +215,9 @@ fn parse_books(books: &[Value]) -> Result<Vec<Verse>> {
 
         for (chapter_idx, chapter_val) in chapters.iter().enumerate() {
             let chapter_num = (chapter_idx + 1) as u16;
-            let Some(verses_arr) = chapter_val.as_array() else { continue };
+            let Some(verses_arr) = chapter_val.as_array() else {
+                continue;
+            };
             for (verse_idx, verse_val) in verses_arr.iter().enumerate() {
                 let verse_num = (verse_idx + 1) as u16;
                 let text = if let Some(text) = verse_val.as_str() {
@@ -243,7 +246,9 @@ fn parse_books(books: &[Value]) -> Result<Vec<Verse>> {
 }
 
 fn extract_verse(value: &Value) -> Option<Verse> {
-    let Value::Object(map) = value else { return None };
+    let Value::Object(map) = value else {
+        return None;
+    };
 
     let book_raw = extract_string(map, &["book", "book_name", "bookName", "bookname"])?;
     let book = normalize_book(&book_raw)

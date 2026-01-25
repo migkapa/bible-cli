@@ -15,12 +15,16 @@ impl MarkdownRenderer {
             s.italic.set_fg(termimad::crossterm::style::Color::Grey);
 
             // Inline code: subtle background
-            s.inline_code.set_bg(termimad::crossterm::style::Color::DarkGrey);
-            s.inline_code.set_fg(termimad::crossterm::style::Color::White);
+            s.inline_code
+                .set_bg(termimad::crossterm::style::Color::DarkGrey);
+            s.inline_code
+                .set_fg(termimad::crossterm::style::Color::White);
 
             // Code blocks: dark background
-            s.code_block.set_bg(termimad::crossterm::style::Color::DarkGrey);
-            s.code_block.set_fg(termimad::crossterm::style::Color::White);
+            s.code_block
+                .set_bg(termimad::crossterm::style::Color::DarkGrey);
+            s.code_block
+                .set_fg(termimad::crossterm::style::Color::White);
 
             // Headers: white and bold, not colorful
             for header in &mut s.headers {

@@ -20,8 +20,7 @@ pub struct VerseRef {
 }
 
 pub fn load_verses(path: &Path) -> Result<Vec<Verse>> {
-    let file = File::open(path)
-        .with_context(|| format!("KJV not found at {}", path.display()))?;
+    let file = File::open(path).with_context(|| format!("KJV not found at {}", path.display()))?;
     let reader = BufReader::new(file);
     let mut verses = Vec::new();
     for (idx, line) in reader.lines().enumerate() {
@@ -39,7 +38,12 @@ pub fn load_verses(path: &Path) -> Result<Vec<Verse>> {
     Ok(verses)
 }
 
-pub fn find_verse<'a>(verses: &'a [Verse], book: &str, chapter: u16, verse: u16) -> Option<&'a Verse> {
+pub fn find_verse<'a>(
+    verses: &'a [Verse],
+    book: &str,
+    chapter: u16,
+    verse: u16,
+) -> Option<&'a Verse> {
     verses
         .iter()
         .find(|v| v.book == book && v.chapter == chapter && v.verse == verse)

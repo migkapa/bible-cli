@@ -4,7 +4,7 @@ mod spinner;
 use std::env;
 use std::io::{self, IsTerminal, Write};
 
-use termimad::crossterm::style::{Attribute, Color, SetAttribute, SetForegroundColor, ResetColor};
+use termimad::crossterm::style::{Attribute, Color, ResetColor, SetAttribute, SetForegroundColor};
 
 use crate::cli::ColorMode;
 use crate::verses::Verse;
@@ -144,5 +144,7 @@ fn should_color_auto() -> bool {
 }
 
 fn terminal_width() -> usize {
-    termimad::crossterm::terminal::size().map(|(w, _)| w as usize).unwrap_or(80)
+    termimad::crossterm::terminal::size()
+        .map(|(w, _)| w as usize)
+        .unwrap_or(80)
 }

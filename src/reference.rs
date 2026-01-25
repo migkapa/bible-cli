@@ -28,8 +28,8 @@ pub fn parse_reference(tokens: &[String]) -> Result<ReferenceQuery> {
         split_trailing_numbers(&joined)?
     };
 
-    let book = normalize_book(&book_part)
-        .ok_or_else(|| anyhow::anyhow!("Unknown book: {}", book_part))?;
+    let book =
+        normalize_book(&book_part).ok_or_else(|| anyhow::anyhow!("Unknown book: {}", book_part))?;
 
     Ok(ReferenceQuery {
         book: book.to_string(),

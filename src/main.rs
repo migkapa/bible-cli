@@ -6,6 +6,7 @@ mod commands;
 mod moods;
 mod output;
 mod reference;
+mod tui;
 mod verses;
 
 use anyhow::Result;
@@ -28,5 +29,6 @@ async fn main() -> Result<()> {
         Commands::Echo(args) => commands::run_echo(args, &paths, &output),
         Commands::Mood(args) => commands::run_mood(args, &paths, &output),
         Commands::Ai(args) => commands::run_ai(args, &paths, &output).await,
+        Commands::Tui(args) => commands::run_tui(args, &paths),
     }
 }

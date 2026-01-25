@@ -9,10 +9,11 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use crate::ai::{AiProvider, ChatMessage, ProviderRequest, StreamEvent};
 use crate::books::normalize_book;
 use crate::cache::{preload_kjv, read_manifest, CachePaths};
-use crate::cli::{AiArgs, CacheArgs, EchoArgs, MoodArgs, ReadArgs, SearchArgs};
+use crate::cli::{AiArgs, CacheArgs, EchoArgs, MoodArgs, ReadArgs, SearchArgs, TuiArgs};
 use crate::moods::{all_moods, find_mood};
 use crate::output::{MarkdownRenderer, OutputStyle, ThinkingIndicator};
 use crate::reference::{parse_reference, ReferenceQuery};
+use crate::tui;
 use crate::verses::{find_verse, load_verses, max_chapter, Verse};
 
 pub fn run_cache(args: &CacheArgs, paths: &CachePaths) -> Result<()> {
@@ -40,25 +41,27 @@ pub fn run_cache(args: &CacheArgs, paths: &CachePaths) -> Result<()> {
 
 pub fn run_read(args: &ReadArgs, paths: &CachePaths, output: &OutputStyle) -> Result<()> {
     let reference = parse_reference(&args.reference)?;
-    let verses = load_verses(&paths.verses_path)
-        .context("KJV not cached. Run `bible cache --preload`.")?;
+    let verses =
+        load_verses(&paths.verses_path).context("KJV not cached. Run `bible cache --preload`.")?;
 
     match (reference.chapter, reference.verse) {
         (None, _) => print_book_overview(&verses, &reference),
         (Some(chapter), None) => print_chapter(&verses, &reference.book, chapter, output),
-        (Some(chapter), Some(verse)) => print_single(&verses, &reference.book, chapter, verse, output),
+        (Some(chapter), Some(verse)) => {
+            print_single(&verses, &reference.book, chapter, verse, output)
+        }
     }
 }
 
 pub fn run_search(args: &SearchArgs, paths: &CachePaths, output: &OutputStyle) -> Result<()> {
-    let verses = load_verses(&paths.verses_path)
-        .context("KJV not cached. Run `bible cache --preload`.")?;
+    let verses =
+        load_verses(&paths.verses_path).context("KJV not cached. Run `bible cache --preload`.")?;
     let needle = args.query.to_lowercase();
 
     let book_filter = match args.book.as_ref() {
         Some(book) => {
-            let normalized = normalize_book(book)
-                .ok_or_else(|| anyhow::anyhow!("Unknown book: {}", book))?;
+            let normalized =
+                normalize_book(book).ok_or_else(|| anyhow::anyhow!("Unknown book: {}", book))?;
             Some(normalized.to_string())
         }
         None => None,
@@ -91,8 +94,8 @@ pub fn run_search(args: &SearchArgs, paths: &CachePaths, output: &OutputStyle) -
 }
 
 pub fn run_today(paths: &CachePaths, output: &OutputStyle) -> Result<()> {
-    let verses = load_verses(&paths.verses_path)
-        .context("KJV not cached. Run `bible cache --preload`.")?;
+    let verses =
+        load_verses(&paths.verses_path).context("KJV not cached. Run `bible cache --preload`.")?;
     let date = Local::now().date_naive();
     let day_seed = date.num_days_from_ce() as usize;
     let idx = day_seed % verses.len();
@@ -105,8 +108,8 @@ pub fn run_today(paths: &CachePaths, output: &OutputStyle) -> Result<()> {
 }
 
 pub fn run_random(paths: &CachePaths, output: &OutputStyle) -> Result<()> {
-    let verses = load_verses(&paths.verses_path)
-        .context("KJV not cached. Run `bible cache --preload`.")?;
+    let verses =
+        load_verses(&paths.verses_path).context("KJV not cached. Run `bible cache --preload`.")?;
     let mut rng = thread_rng();
     let verse = verses
         .choose(&mut rng)
@@ -124,8 +127,8 @@ pub fn run_echo(args: &EchoArgs, paths: &CachePaths, output: &OutputStyle) -> Re
         .verse
         .ok_or_else(|| anyhow::anyhow!("Verse is required"))?;
 
-    let verses = load_verses(&paths.verses_path)
-        .context("KJV not cached. Run `bible cache --preload`.")?;
+    let verses =
+        load_verses(&paths.verses_path).context("KJV not cached. Run `bible cache --preload`.")?;
 
     let mut chapter_verses: Vec<&Verse> = verses
         .iter()
@@ -163,15 +166,16 @@ pub fn run_mood(args: &MoodArgs, paths: &CachePaths, output: &OutputStyle) -> Re
     }
 
     let mood_name = args.mood.as_ref().unwrap();
-    let mood = find_mood(mood_name)
-        .ok_or_else(|| anyhow::anyhow!("Unknown mood: {}", mood_name))?;
+    let mood =
+        find_mood(mood_name).ok_or_else(|| anyhow::anyhow!("Unknown mood: {}", mood_name))?;
 
-    let verses = load_verses(&paths.verses_path)
-        .context("KJV not cached. Run `bible cache --preload`.")?;
+    let verses =
+        load_verses(&paths.verses_path).context("KJV not cached. Run `bible cache --preload`.")?;
 
     println!("Mood: {}", mood.name);
     for reference in mood.refs {
-        if let Some(verse) = find_verse(&verses, reference.book, reference.chapter, reference.verse) {
+        if let Some(verse) = find_verse(&verses, reference.book, reference.chapter, reference.verse)
+        {
             println!("{}", output.verse_line(verse));
         }
     }
@@ -181,8 +185,8 @@ pub fn run_mood(args: &MoodArgs, paths: &CachePaths, output: &OutputStyle) -> Re
 
 pub async fn run_ai(args: &AiArgs, paths: &CachePaths, output: &OutputStyle) -> Result<()> {
     let reference = parse_reference(&args.reference)?;
-    let verses = load_verses(&paths.verses_path)
-        .context("KJV not cached. Run `bible cache --preload`.")?;
+    let verses =
+        load_verses(&paths.verses_path).context("KJV not cached. Run `bible cache --preload`.")?;
 
     let selected = select_ai_verses(&verses, &reference, args.window)?;
 
@@ -331,7 +335,10 @@ async fn run_ai_chat_streaming(
             if provider_name.is_empty() {
                 output.print_dim(&format!("Current provider: {}", current_provider));
                 output.print_dim("Usage: /provider <openai|anthropic>");
-            } else if matches!(provider_name.to_lowercase().as_str(), "openai" | "anthropic") {
+            } else if matches!(
+                provider_name.to_lowercase().as_str(),
+                "openai" | "anthropic"
+            ) {
                 current_provider = provider_name.to_lowercase();
                 output.print_dim(&format!("Provider set to {}", current_provider));
             } else {
@@ -558,4 +565,11 @@ fn contains_markdown(text: &str) -> bool {
         || text.contains("- ")
         || text.contains("1. ")
         || text.contains("> ")
+}
+
+pub fn run_tui(args: &TuiArgs, paths: &CachePaths) -> Result<()> {
+    let verses =
+        load_verses(&paths.verses_path).context("KJV not cached. Run `bible cache --preload`.")?;
+
+    tui::run(verses, args.book.clone(), args.r#ref.clone())
 }
