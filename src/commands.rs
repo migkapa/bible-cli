@@ -1,26 +1,35 @@
 use anyhow::{bail, Context, Result};
 use chrono::{Datelike, Local};
 use futures::StreamExt;
+use rand::rngs::StdRng;
 use rand::seq::SliceRandom;
-use rand::thread_rng;
+use rand::{thread_rng, SeedableRng};
+use regex::RegexBuilder;
 use std::io::{self, Write};
 use tokio::io::{AsyncBufReadExt, BufReader};
 
 use crate::ai::{AiProvider, ChatMessage, ProviderRequest, StreamEvent};
-use crate::books::normalize_book;
+use crate::books::{is_old_testament, normalize_book};
 use crate::cache::{preload_kjv, read_manifest, CachePaths};
-use crate::cli::{AiArgs, CacheArgs, EchoArgs, MoodArgs, ReadArgs, SearchArgs, TuiArgs};
+use crate::cli::{
+    AiArgs, CacheArgs, EchoArgs, MoodArgs, RandomArgs, ReadArgs, SearchArgs, Testament, TodayArgs,
+    TuiArgs,
+};
 use crate::moods::{all_moods, find_mood};
 use crate::output::{MarkdownRenderer, OutputStyle, ThinkingIndicator};
 use crate::reference::{parse_reference, ReferenceQuery};
 use crate::tui;
-use crate::verses::{find_verse, load_verses, max_chapter, Verse};
+use crate::verses::{load_verses, max_chapter, Verse, VerseIndex};
 
 pub fn run_cache(args: &CacheArgs, paths: &CachePaths) -> Result<()> {
     if args.preload {
         let count = preload_kjv(paths, args.source.as_deref())?;
         println!("KJV cached: {} verses", count);
         return Ok(());
+    }
+
+    if args.status {
+        return run_cache_status(paths);
     }
 
     println!("Cache root: {}", paths.root.display());
@@ -39,24 +48,102 @@ pub fn run_cache(args: &CacheArgs, paths: &CachePaths) -> Result<()> {
     Ok(())
 }
 
+fn run_cache_status(paths: &CachePaths) -> Result<()> {
+    let translations_dir = paths.root.join("translations");
+    println!("Cache root: {}", paths.root.display());
+
+    let entries = match std::fs::read_dir(&translations_dir) {
+        Ok(entries) => entries,
+        Err(_) => {
+            println!("No translations installed. Run `bible cache --preload`.");
+            return Ok(());
+        }
+    };
+
+    let mut found = false;
+    for entry in entries.flatten() {
+        if !entry.path().is_dir() {
+            continue;
+        }
+        let id = entry.file_name().to_string_lossy().to_string();
+        let verses_path = entry.path().join("verses.jsonl");
+        let manifest_path = entry.path().join("manifest.json");
+        if !verses_path.exists() {
+            continue;
+        }
+        found = true;
+        let size = std::fs::metadata(&verses_path)
+            .map(|m| m.len())
+            .unwrap_or(0);
+        match read_manifest(&manifest_path) {
+            Some(m) => println!(
+                "{:<6} {} verses, {}  (updated {})",
+                id,
+                m.verse_count,
+                human_size(size),
+                m.created_at
+            ),
+            None => println!("{:<6} {}", id, human_size(size)),
+        }
+    }
+
+    if !found {
+        println!("No translations installed. Run `bible cache --preload`.");
+    }
+
+    Ok(())
+}
+
+fn human_size(bytes: u64) -> String {
+    const UNITS: &[&str] = &["B", "KB", "MB", "GB"];
+    let mut size = bytes as f64;
+    let mut unit = 0;
+    while size >= 1024.0 && unit < UNITS.len() - 1 {
+        size /= 1024.0;
+        unit += 1;
+    }
+    if unit == 0 {
+        format!("{} {}", bytes, UNITS[unit])
+    } else {
+        format!("{:.1} {}", size, UNITS[unit])
+    }
+}
+
 pub fn run_read(args: &ReadArgs, paths: &CachePaths, output: &OutputStyle) -> Result<()> {
     let reference = parse_reference(&args.reference)?;
     let verses =
         load_verses(&paths.verses_path).context("KJV not cached. Run `bible cache --preload`.")?;
+    let index = VerseIndex::build(&verses);
 
-    match (reference.chapter, reference.verse) {
-        (None, _) => print_book_overview(&verses, &reference),
-        (Some(chapter), None) => print_chapter(&verses, &reference.book, chapter, output),
-        (Some(chapter), Some(verse)) => {
-            print_single(&verses, &reference.book, chapter, verse, output)
+    // Whole-book reference: a chapter overview in the human view, or the full
+    // book as data in structured formats.
+    if reference.chapter.is_none() {
+        if output.is_structured() {
+            let book_verses = book_verses(&verses, &reference.book);
+            if book_verses.is_empty() {
+                bail!("Book not found: {}", reference.book);
+            }
+            output.emit_verses(&book_verses);
+            return Ok(());
         }
+        return print_book_overview(&verses, &reference);
     }
+
+    let selected = index.resolve(&reference)?;
+    output.emit_verses(&selected);
+    Ok(())
+}
+
+/// All verses of a book in canonical order.
+fn book_verses<'a>(verses: &'a [Verse], book: &str) -> Vec<&'a Verse> {
+    let mut out: Vec<&Verse> = verses.iter().filter(|v| v.book == book).collect();
+    out.sort_by_key(|v| (v.chapter, v.verse));
+    out
 }
 
 pub fn run_search(args: &SearchArgs, paths: &CachePaths, output: &OutputStyle) -> Result<()> {
     let verses =
         load_verses(&paths.verses_path).context("KJV not cached. Run `bible cache --preload`.")?;
-    let needle = args.query.to_lowercase();
 
     let book_filter = match args.book.as_ref() {
         Some(book) => {
@@ -67,55 +154,156 @@ pub fn run_search(args: &SearchArgs, paths: &CachePaths, output: &OutputStyle) -
         None => None,
     };
 
-    let mut matches = Vec::new();
+    let matcher = build_matcher(args)?;
+
+    // Scan the whole corpus so counts and ordering are complete, then limit for
+    // display (unless --count, which reports the full total).
+    let mut matches: Vec<&Verse> = Vec::new();
     for verse in &verses {
         if let Some(ref book) = book_filter {
             if &verse.book != book {
                 continue;
             }
         }
-        if verse.text.to_lowercase().contains(&needle) {
+        if matcher.is_match(&verse.text) {
             matches.push(verse);
-        }
-        if matches.len() >= args.limit {
-            break;
         }
     }
 
-    if matches.is_empty() {
-        println!("No matches found.");
+    if args.count {
+        println!("{}", matches.len());
         return Ok(());
     }
 
-    for verse in matches {
-        println!("{}", output.verse_line(verse));
+    if matches.is_empty() {
+        if !output.is_structured() {
+            println!("No matches found.");
+        }
+        return Ok(());
+    }
+
+    matches.truncate(args.limit);
+    output.emit_verses(&matches);
+    Ok(())
+}
+
+/// A compiled query matcher: substring (default), whole-word, or full regex.
+/// All matching is case-insensitive.
+enum Matcher {
+    Substring(String),
+    Regex(regex::Regex),
+}
+
+impl Matcher {
+    fn is_match(&self, text: &str) -> bool {
+        match self {
+            Matcher::Substring(needle) => text.to_lowercase().contains(needle),
+            Matcher::Regex(re) => re.is_match(text),
+        }
+    }
+}
+
+fn build_matcher(args: &SearchArgs) -> Result<Matcher> {
+    if args.regex || args.word {
+        let pattern = if args.word {
+            // Whole-word match; the query is escaped unless it is already a regex.
+            let inner = if args.regex {
+                args.query.clone()
+            } else {
+                regex::escape(&args.query)
+            };
+            format!(r"\b(?:{})\b", inner)
+        } else {
+            args.query.clone()
+        };
+        let re = RegexBuilder::new(&pattern)
+            .case_insensitive(true)
+            .build()
+            .with_context(|| format!("Invalid regex: {}", args.query))?;
+        Ok(Matcher::Regex(re))
+    } else {
+        Ok(Matcher::Substring(args.query.to_lowercase()))
+    }
+}
+
+pub fn run_today(args: &TodayArgs, paths: &CachePaths, output: &OutputStyle) -> Result<()> {
+    let verses =
+        load_verses(&paths.verses_path).context("KJV not cached. Run `bible cache --preload`.")?;
+
+    let book_filter = normalize_book_filter(args.book.as_deref())?;
+    let pool = filter_verses(&verses, book_filter.as_deref(), args.testament);
+    if pool.is_empty() {
+        bail!("No verses match those constraints.");
+    }
+
+    let date = Local::now().date_naive();
+    let day_seed = date.num_days_from_ce() as usize;
+    let verse = pool[day_seed % pool.len()];
+
+    output.emit_verses(&[verse]);
+    if !output.is_structured() {
+        println!("Prompt: {}", daily_prompt(day_seed));
     }
     Ok(())
 }
 
-pub fn run_today(paths: &CachePaths, output: &OutputStyle) -> Result<()> {
+pub fn run_random(args: &RandomArgs, paths: &CachePaths, output: &OutputStyle) -> Result<()> {
     let verses =
         load_verses(&paths.verses_path).context("KJV not cached. Run `bible cache --preload`.")?;
-    let date = Local::now().date_naive();
-    let day_seed = date.num_days_from_ce() as usize;
-    let idx = day_seed % verses.len();
-    let verse = &verses[idx];
 
-    let prompt = daily_prompt(day_seed);
-    println!("{}", output.verse_line(verse));
-    println!("Prompt: {}", prompt);
+    let book_filter = normalize_book_filter(args.book.as_deref())?;
+    let mut pool = filter_verses(&verses, book_filter.as_deref(), args.testament);
+    if let Some(max) = args.max_words {
+        pool.retain(|v| v.text.split_whitespace().count() <= max);
+    }
+    if pool.is_empty() {
+        bail!("No verses match those constraints.");
+    }
+
+    let count = args.count.max(1).min(pool.len());
+    let chosen: Vec<&Verse> = if let Some(seed) = args.seed {
+        let mut rng = StdRng::seed_from_u64(seed);
+        pool.choose_multiple(&mut rng, count).copied().collect()
+    } else {
+        let mut rng = thread_rng();
+        pool.choose_multiple(&mut rng, count).copied().collect()
+    };
+
+    output.emit_verses(&chosen);
     Ok(())
 }
 
-pub fn run_random(paths: &CachePaths, output: &OutputStyle) -> Result<()> {
-    let verses =
-        load_verses(&paths.verses_path).context("KJV not cached. Run `bible cache --preload`.")?;
-    let mut rng = thread_rng();
-    let verse = verses
-        .choose(&mut rng)
-        .ok_or_else(|| anyhow::anyhow!("No verses available"))?;
-    println!("{}", output.verse_line(verse));
-    Ok(())
+/// Normalize an optional `--book` argument to its canonical name, erroring on
+/// an unknown book.
+fn normalize_book_filter(book: Option<&str>) -> Result<Option<String>> {
+    match book {
+        Some(book) => {
+            let normalized =
+                normalize_book(book).ok_or_else(|| anyhow::anyhow!("Unknown book: {}", book))?;
+            Ok(Some(normalized.to_string()))
+        }
+        None => Ok(None),
+    }
+}
+
+/// Filter the verse list by an optional book and/or testament.
+fn filter_verses<'a>(
+    verses: &'a [Verse],
+    book: Option<&str>,
+    testament: Option<Testament>,
+) -> Vec<&'a Verse> {
+    verses
+        .iter()
+        .filter(|v| match book {
+            Some(b) => v.book == b,
+            None => true,
+        })
+        .filter(|v| match testament {
+            Some(Testament::Ot) => is_old_testament(&v.book) == Some(true),
+            Some(Testament::Nt) => is_old_testament(&v.book) == Some(false),
+            None => true,
+        })
+        .collect()
 }
 
 pub fn run_echo(args: &EchoArgs, paths: &CachePaths, output: &OutputStyle) -> Result<()> {
@@ -148,6 +336,12 @@ pub fn run_echo(args: &EchoArgs, paths: &CachePaths, output: &OutputStyle) -> Re
     let start = position.saturating_sub(window);
     let end = (position + window).min(chapter_verses.len() - 1);
 
+    if output.is_structured() {
+        let slice: Vec<&Verse> = chapter_verses[start..=end].to_vec();
+        output.emit_verses(&slice);
+        return Ok(());
+    }
+
     for (idx, verse) in chapter_verses.iter().enumerate().take(end + 1).skip(start) {
         let marker = if idx == position { "*" } else { " " };
         println!("{}", output.marked_verse_line(marker, verse));
@@ -171,14 +365,18 @@ pub fn run_mood(args: &MoodArgs, paths: &CachePaths, output: &OutputStyle) -> Re
 
     let verses =
         load_verses(&paths.verses_path).context("KJV not cached. Run `bible cache --preload`.")?;
+    let index = VerseIndex::build(&verses);
 
-    println!("Mood: {}", mood.name);
-    for reference in mood.refs {
-        if let Some(verse) = find_verse(&verses, reference.book, reference.chapter, reference.verse)
-        {
-            println!("{}", output.verse_line(verse));
-        }
+    let selected: Vec<&Verse> = mood
+        .refs
+        .iter()
+        .filter_map(|r| index.get(r.book, r.chapter, r.verse))
+        .collect();
+
+    if !output.is_structured() {
+        println!("Mood: {}", mood.name);
     }
+    output.emit_verses(&selected);
 
     Ok(())
 }
@@ -435,34 +633,6 @@ fn print_book_overview(verses: &[Verse], reference: &ReferenceQuery) -> Result<(
     };
     println!("{} has {} chapters.", reference.book, max_chapter);
     println!("Tip: bible read {} <chapter>", reference.book);
-    Ok(())
-}
-
-fn print_chapter(verses: &[Verse], book: &str, chapter: u16, output: &OutputStyle) -> Result<()> {
-    let mut matches: Vec<&Verse> = verses
-        .iter()
-        .filter(|v| v.book == book && v.chapter == chapter)
-        .collect();
-    if matches.is_empty() {
-        bail!("No verses found for {} {}", book, chapter);
-    }
-    matches.sort_by_key(|v| v.verse);
-    for verse in matches {
-        println!("{}", output.verse_line(verse));
-    }
-    Ok(())
-}
-
-fn print_single(
-    verses: &[Verse],
-    book: &str,
-    chapter: u16,
-    verse: u16,
-    output: &OutputStyle,
-) -> Result<()> {
-    let verse = find_verse(verses, book, chapter, verse)
-        .ok_or_else(|| anyhow::anyhow!("Verse not found"))?;
-    println!("{}", output.verse_line(verse));
     Ok(())
 }
 

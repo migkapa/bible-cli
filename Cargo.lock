@@ -124,17 +124,19 @@ checksum = "72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6"
 
 [[package]]
 name = "bible-cli"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "async-stream",
  "chrono",
  "clap",
+ "clap_complete",
  "crossterm 0.28.1",
  "futures",
  "indicatif",
  "rand 0.8.5",
  "ratatui",
+ "regex",
  "reqwest",
  "serde",
  "serde_json",
@@ -228,6 +230,15 @@ dependencies = [
  "anstyle",
  "clap_lex",
  "strsim",
+]
+
+[[package]]
+name = "clap_complete"
+version = "4.6.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e0a7a9bfdb35811f9e59832f0f05975114d2251b415fb534108e6f34060fd772"
+dependencies = [
+ "clap",
 ]
 
 [[package]]

@@ -4,17 +4,62 @@ mod spinner;
 use std::env;
 use std::io::{self, IsTerminal, Write};
 
+use clap::ValueEnum;
+use serde::Serialize;
 use termimad::crossterm::style::{Attribute, Color, ResetColor, SetAttribute, SetForegroundColor};
 
+use crate::books::osis_code;
 use crate::cli::ColorMode;
 use crate::verses::Verse;
 
 pub use markdown::MarkdownRenderer;
 pub use spinner::ThinkingIndicator;
 
+/// How verse output is rendered. `Plain` is the default human-readable form;
+/// the rest turn the CLI into a scriptable data source.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
+pub enum Format {
+    /// Colorized reference + text (default).
+    Plain,
+    /// A single JSON array of verse records.
+    Json,
+    /// One JSON object per line (newline-delimited).
+    Ndjson,
+    /// Tab-separated: id, book, chapter, verse, text.
+    Tsv,
+    /// Just the reference (e.g. `John 3:16`).
+    Ref,
+    /// Just the verse text, no reference or color.
+    Raw,
+}
+
+#[derive(Serialize)]
+struct VerseRecord<'a> {
+    id: String,
+    reference: String,
+    book: &'a str,
+    chapter: u16,
+    verse: u16,
+    text: &'a str,
+}
+
+impl<'a> VerseRecord<'a> {
+    fn new(v: &'a Verse) -> Self {
+        Self {
+            id: format!("{}.{}.{}", osis_code(&v.book), v.chapter, v.verse),
+            reference: format!("{} {}:{}", v.book, v.chapter, v.verse),
+            book: &v.book,
+            chapter: v.chapter,
+            verse: v.verse,
+            text: &v.text,
+        }
+    }
+}
+
 pub struct OutputStyle {
     pub color: bool,
     pub theme: Theme,
+    pub format: Format,
 }
 
 pub struct Theme {
@@ -38,15 +83,76 @@ impl Theme {
 }
 
 impl OutputStyle {
-    pub fn new(mode: ColorMode) -> Self {
-        let color = match mode {
+    pub fn new(mode: ColorMode, format: Format) -> Self {
+        let mut color = match mode {
             ColorMode::Always => true,
             ColorMode::Never => false,
             ColorMode::Auto => should_color_auto(),
         };
+        // Machine-readable formats are never colorized.
+        if !matches!(format, Format::Plain) {
+            color = false;
+        }
         Self {
             color,
             theme: Theme::claude_code(),
+            format,
+        }
+    }
+
+    /// True when output is a machine-readable format rather than the decorated
+    /// human view. Commands use this to suppress prompts, headers, and banners.
+    pub fn is_structured(&self) -> bool {
+        !matches!(self.format, Format::Plain)
+    }
+
+    /// Render a set of verses according to the active format.
+    pub fn emit_verses(&self, verses: &[&Verse]) {
+        match self.format {
+            Format::Plain => {
+                for v in verses {
+                    println!("{}", self.verse_line(v));
+                }
+            }
+            Format::Raw => {
+                for v in verses {
+                    println!("{}", v.text);
+                }
+            }
+            Format::Ref => {
+                for v in verses {
+                    println!("{} {}:{}", v.book, v.chapter, v.verse);
+                }
+            }
+            Format::Tsv => {
+                for v in verses {
+                    println!(
+                        "{}.{}.{}\t{}\t{}\t{}\t{}",
+                        osis_code(&v.book),
+                        v.chapter,
+                        v.verse,
+                        v.book,
+                        v.chapter,
+                        v.verse,
+                        v.text
+                    );
+                }
+            }
+            Format::Ndjson => {
+                for v in verses {
+                    if let Ok(line) = serde_json::to_string(&VerseRecord::new(v)) {
+                        println!("{}", line);
+                    }
+                }
+            }
+            Format::Json => {
+                let records: Vec<VerseRecord> =
+                    verses.iter().map(|v| VerseRecord::new(v)).collect();
+                match serde_json::to_string_pretty(&records) {
+                    Ok(json) => println!("{}", json),
+                    Err(_) => println!("[]"),
+                }
+            }
         }
     }
 

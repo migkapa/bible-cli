@@ -35,17 +35,37 @@ cargo install bible-cli
 
 ## Commands
 
-- `bible read <book> [chapter] [verse]`
-- `bible search <query> [--book <book>] [--limit N]`
-- `bible today`
-- `bible random`
+- `bible read <reference>` — single verse, range (`John 3:16-18`), list (`John 3:16,18,20`), whole chapter (`Psalm 23`), or book overview
+- `bible search <query> [--book <book>] [--limit N] [--regex] [--word] [--count]`
+- `bible today [--book <book>] [--testament ot|nt]`
+- `bible random [-n N] [--book <book>] [--testament ot|nt] [--max-words N] [--seed N]`
 - `bible echo <book> <chapter> <verse> [--window N]`
 - `bible mood <mood>` or `bible mood --list`
-- `bible cache [--preload] [--source <url-or-path>]`
+- `bible cache [--preload] [--source <url-or-path>] [--status]`
 - `bible ai <reference> [--chat]`
 - `bible tui [--book <book>]`
+- `bible completions <bash|zsh|fish|powershell|elvish>`
 
 Chat commands (with `--chat`): `/help`, `/model <name>`, `/provider <name>`, `/reset`, `/exit`.
+
+## Output formats
+
+Every verse-producing command accepts a global output format, turning the CLI
+into a scriptable data source:
+
+- `--json` — a JSON array of verse records (`id`, `reference`, `book`, `chapter`, `verse`, `text`)
+- `--format ndjson` — one JSON object per line
+- `--format tsv` — `id`, `book`, `chapter`, `verse`, `text` (tab-separated)
+- `--format ref` — references only (`John 3:16`)
+- `--raw` — verse text only, no reference or color
+
+```bash
+bible read John 3:16 --json
+bible search love --limit 50 --format ndjson | jq -r .reference
+bible random --seed 42 --book Proverbs --raw | pbcopy
+```
+
+Ids use OSIS-style book codes (`John.3.16`, `1Cor.13.4`) for stable joins.
 
 ## AI
 
