@@ -33,13 +33,34 @@ jobs:
     needs: publish
     runs-on: ubuntu-latest
     steps:
-      - name: Update Homebrew formula
-        uses: mislav/bump-homebrew-formula-action@v3
-        with:
-          formula-name: bible-cli
-          formula-path: Formula/bible-cli.rb
-          homebrew-tap: migkapa/homebrew-tap
-          tag-name: ${{ github.ref_name }}
-          download-url: https://github.com/${{ github.repository }}/archive/refs/tags/${{ github.ref_name }}.tar.gz
+      # Commit the formula bump directly to the tap we own. This avoids the
+      # fork-and-PR flow (which fails with HTTP 303 when the token owner already
+      # owns the tap) and needs only push access to the single tap repo.
+      - name: Bump formula in tap
         env:
-          COMMITTER_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          TAG: ${{ github.ref_name }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          version="${TAG#v}"
+          tarball="https://github.com/${REPO}/archive/refs/tags/${TAG}.tar.gz"
+          sha="$(curl -fsSL "$tarball" | sha256sum | cut -d' ' -f1)"
+
+          git clone --depth 1 \
+            "https://x-access-token:${TAP_TOKEN}@github.com/migkapa/homebrew-tap.git" tap
+          cd tap
+
+          formula="Formula/bible-cli.rb"
+          sed -i -E "s|^  url \".*\"|  url \"${tarball}\"|" "$formula"
+          sed -i -E "s|^  sha256 \".*\"|  sha256 \"${sha}\"|" "$formula"
+
+          if git diff --quiet; then
+            echo "Formula already up to date."
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -am "bible-cli ${version}"
+          git push
