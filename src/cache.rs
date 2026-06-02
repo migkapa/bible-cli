@@ -9,15 +9,33 @@ use std::path::{Path, PathBuf};
 use crate::books::normalize_book;
 use crate::verses::Verse;
 
-const DEFAULT_KJV_SOURCE: &str =
-    "https://raw.githubusercontent.com/thiagobodruk/bible/master/json/en_kjv.json";
+pub const DEFAULT_TRANSLATION: &str = "kjv";
+
+/// Built-in source URLs for known public-domain translations, so common ones can
+/// be installed with just `bible translation add <id>` (no `--source`).
+const KNOWN_SOURCES: &[(&str, &str)] = &[
+    (
+        "kjv",
+        "https://raw.githubusercontent.com/thiagobodruk/bible/master/json/en_kjv.json",
+    ),
+    (
+        "bbe",
+        "https://raw.githubusercontent.com/thiagobodruk/bible/master/json/en_bbe.json",
+    ),
+];
+
+pub fn known_source(id: &str) -> Option<&'static str> {
+    KNOWN_SOURCES
+        .iter()
+        .find(|(known, _)| *known == id)
+        .map(|(_, url)| *url)
+}
 
 #[derive(Debug)]
 pub struct CachePaths {
     pub root: PathBuf,
-    pub kjv_dir: PathBuf,
-    pub verses_path: PathBuf,
-    pub manifest_path: PathBuf,
+    /// The active translation id (e.g. "kjv").
+    pub translation: String,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -28,19 +46,53 @@ pub struct Manifest {
     pub verse_count: usize,
 }
 
-pub fn cache_paths(custom_root: Option<PathBuf>) -> CachePaths {
-    let root = match custom_root {
-        Some(path) => path,
-        None => default_cache_root(),
-    };
-    let kjv_dir = root.join("translations").join("kjv");
-    let verses_path = kjv_dir.join("verses.jsonl");
-    let manifest_path = kjv_dir.join("manifest.json");
-    CachePaths {
-        root,
-        kjv_dir,
-        verses_path,
-        manifest_path,
+/// Persisted user config (currently just the default translation).
+#[derive(Debug, Default, Serialize, Deserialize)]
+pub struct Config {
+    #[serde(default)]
+    pub default_translation: Option<String>,
+}
+
+/// A translation present in the cache.
+pub struct InstalledTranslation {
+    pub id: String,
+    pub manifest: Option<Manifest>,
+    pub size_bytes: u64,
+}
+
+impl CachePaths {
+    pub fn new(root: PathBuf, translation: String) -> Self {
+        Self { root, translation }
+    }
+
+    pub fn translations_root(&self) -> PathBuf {
+        self.root.join("translations")
+    }
+
+    pub fn dir_for(&self, id: &str) -> PathBuf {
+        self.translations_root().join(id)
+    }
+
+    pub fn verses_path_for(&self, id: &str) -> PathBuf {
+        self.dir_for(id).join("verses.jsonl")
+    }
+
+    pub fn manifest_path_for(&self, id: &str) -> PathBuf {
+        self.dir_for(id).join("manifest.json")
+    }
+
+    /// Verses path for the active translation.
+    pub fn verses_path(&self) -> PathBuf {
+        self.verses_path_for(&self.translation)
+    }
+
+    /// Manifest path for the active translation.
+    pub fn manifest_path(&self) -> PathBuf {
+        self.manifest_path_for(&self.translation)
+    }
+
+    pub fn is_installed(&self, id: &str) -> bool {
+        self.verses_path_for(id).exists()
     }
 }
 
@@ -54,19 +106,91 @@ pub fn default_cache_root() -> PathBuf {
     std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
 }
 
-pub fn preload_kjv(paths: &CachePaths, source: Option<&str>) -> Result<usize> {
-    fs::create_dir_all(&paths.kjv_dir)
-        .with_context(|| format!("Failed creating {}", paths.kjv_dir.display()))?;
+/// Download, normalize, and store a translation under `translations/<id>/`.
+/// When `source` is `None`, a known built-in source is used (error if unknown).
+pub fn preload(paths: &CachePaths, id: &str, source: Option<&str>) -> Result<usize> {
+    let source = match source {
+        Some(s) => s.to_string(),
+        None => known_source(id)
+            .ok_or_else(|| {
+                anyhow::anyhow!("No known source for '{}'. Pass --source <url-or-path>.", id)
+            })?
+            .to_string(),
+    };
 
-    let source = source.unwrap_or(DEFAULT_KJV_SOURCE);
-    let raw = read_source(source)?;
+    let dir = paths.dir_for(id);
+    fs::create_dir_all(&dir).with_context(|| format!("Failed creating {}", dir.display()))?;
+
+    let raw = read_source(&source)?;
     let verses = normalize_source_to_verses(&raw)
-        .with_context(|| format!("Failed parsing KJV source from {}", source))?;
+        .with_context(|| format!("Failed parsing translation source from {}", source))?;
 
-    write_jsonl(&paths.verses_path, &verses)?;
-    write_manifest(&paths.manifest_path, source, verses.len())?;
+    write_jsonl(&paths.verses_path_for(id), &verses)?;
+    write_manifest(&paths.manifest_path_for(id), id, &source, verses.len())?;
 
     Ok(verses.len())
+}
+
+/// List every translation present in the cache, sorted by id.
+pub fn installed_translations(paths: &CachePaths) -> Vec<InstalledTranslation> {
+    let mut out = Vec::new();
+    let Ok(entries) = fs::read_dir(paths.translations_root()) else {
+        return out;
+    };
+    for entry in entries.flatten() {
+        if !entry.path().is_dir() {
+            continue;
+        }
+        let id = entry.file_name().to_string_lossy().to_string();
+        let verses_path = paths.verses_path_for(&id);
+        if !verses_path.exists() {
+            continue;
+        }
+        let size_bytes = fs::metadata(&verses_path).map(|m| m.len()).unwrap_or(0);
+        let manifest = read_manifest(&paths.manifest_path_for(&id));
+        out.push(InstalledTranslation {
+            id,
+            manifest,
+            size_bytes,
+        });
+    }
+    out.sort_by(|a, b| a.id.cmp(&b.id));
+    out
+}
+
+/// Remove an installed translation's directory. Returns false if it was absent.
+pub fn remove_translation(paths: &CachePaths, id: &str) -> Result<bool> {
+    let dir = paths.dir_for(id);
+    if !dir.exists() {
+        return Ok(false);
+    }
+    fs::remove_dir_all(&dir).with_context(|| format!("Failed removing {}", dir.display()))?;
+    Ok(true)
+}
+
+fn config_path(root: &Path) -> PathBuf {
+    root.join("config.json")
+}
+
+pub fn load_config(root: &Path) -> Config {
+    fs::read_to_string(config_path(root))
+        .ok()
+        .and_then(|raw| serde_json::from_str(&raw).ok())
+        .unwrap_or_default()
+}
+
+/// The configured default translation, if any.
+pub fn load_default_translation(root: &Path) -> Option<String> {
+    load_config(root).default_translation
+}
+
+pub fn save_default_translation(root: &Path, id: &str) -> Result<()> {
+    fs::create_dir_all(root).with_context(|| format!("Failed creating {}", root.display()))?;
+    let mut config = load_config(root);
+    config.default_translation = Some(id.to_string());
+    let raw = serde_json::to_string_pretty(&config)?;
+    fs::write(config_path(root), raw).context("Failed writing config")?;
+    Ok(())
 }
 
 pub fn read_manifest(path: &Path) -> Option<Manifest> {
@@ -74,9 +198,9 @@ pub fn read_manifest(path: &Path) -> Option<Manifest> {
     serde_json::from_str(&raw).ok()
 }
 
-fn write_manifest(path: &Path, source: &str, verse_count: usize) -> Result<()> {
+fn write_manifest(path: &Path, id: &str, source: &str, verse_count: usize) -> Result<()> {
     let manifest = Manifest {
-        translation: "KJV".to_string(),
+        translation: id.to_string(),
         source: source.to_string(),
         created_at: Utc::now().to_rfc3339(),
         verse_count,
@@ -101,16 +225,28 @@ fn read_source(source: &str) -> Result<String> {
     }
 
     if trimmed.starts_with("http://") || trimmed.starts_with("https://") {
-        let response = reqwest::blocking::get(trimmed)
-            .with_context(|| format!("Failed downloading {}", trimmed))?;
+        return http_get(trimmed);
+    }
+
+    bail!("Unsupported source: {}", source)
+}
+
+/// Download a URL's body. Runs the blocking HTTP client on a dedicated thread so
+/// it never executes inside the async (tokio) runtime, where `reqwest::blocking`
+/// would panic.
+fn http_get(url: &str) -> Result<String> {
+    let url = url.to_string();
+    std::thread::spawn(move || -> Result<String> {
+        let response =
+            reqwest::blocking::get(&url).with_context(|| format!("Failed downloading {}", url))?;
         let status = response.status();
         if !status.is_success() {
             bail!("Download failed with status {}", status);
         }
-        return response.text().context("Failed reading response body");
-    }
-
-    bail!("Unsupported source: {}", source)
+        response.text().context("Failed reading response body")
+    })
+    .join()
+    .map_err(|_| anyhow::anyhow!("Download thread panicked"))?
 }
 
 fn write_jsonl(path: &Path, verses: &[Verse]) -> Result<()> {

@@ -41,12 +41,32 @@ cargo install bible-cli
 - `bible random [-n N] [--book <book>] [--testament ot|nt] [--max-words N] [--seed N]`
 - `bible echo <book> <chapter> <verse> [--window N]`
 - `bible mood <mood>` or `bible mood --list`
+- `bible topic <name>` or `bible topic --list` (curated study collections; `--refs-only`)
+- `bible parallel <reference> --with kjv,bbe` — compare translations side by side
+- `bible export <reference> --to md|anki|json|txt`
+- `bible translation list|add <id> [--source]|default <id>|remove <id>`
 - `bible cache [--preload] [--source <url-or-path>] [--status]`
 - `bible ai <reference> [--chat]`
 - `bible tui [--book <book>]`
 - `bible completions <bash|zsh|fish|powershell|elvish>`
 
+A global `-t/--translation <id>` selects which translation to read from (default:
+the configured default, else `kjv`).
+
 Chat commands (with `--chat`): `/help`, `/model <name>`, `/provider <name>`, `/reset`, `/exit`.
+
+## Translations
+
+The CLI is multi-translation. KJV ships as the default; install more from any
+JSON/JSONL source (known public-domain ids like `bbe` need no `--source`):
+
+```bash
+bible translation add bbe              # Bible in Basic English
+bible translation list                 # installed translations (* = active)
+bible translation default bbe          # set the default
+bible -t bbe read John 3:16            # one-off override
+bible parallel John 3:16 --with kjv,bbe
+```
 
 ## Output formats
 

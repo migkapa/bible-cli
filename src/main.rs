@@ -6,6 +6,7 @@ mod commands;
 mod moods;
 mod output;
 mod reference;
+mod topics;
 mod tui;
 mod verses;
 
@@ -26,7 +27,17 @@ async fn main() -> Result<()> {
         return Ok(());
     }
 
-    let paths = cache::cache_paths(cli.data_dir.clone());
+    // Resolve the active translation: --translation flag > configured default > "kjv".
+    let root = cli
+        .data_dir
+        .clone()
+        .unwrap_or_else(cache::default_cache_root);
+    let translation = cli
+        .translation
+        .clone()
+        .or_else(|| cache::load_default_translation(&root))
+        .unwrap_or_else(|| cache::DEFAULT_TRANSLATION.to_string());
+    let paths = cache::CachePaths::new(root, translation);
     let output = output::OutputStyle::new(cli.color, cli.resolved_format());
 
     match &cli.command {
@@ -39,6 +50,10 @@ async fn main() -> Result<()> {
         Commands::Mood(args) => commands::run_mood(args, &paths, &output),
         Commands::Ai(args) => commands::run_ai(args, &paths, &output).await,
         Commands::Tui(args) => commands::run_tui(args, &paths),
+        Commands::Parallel(args) => commands::run_parallel(args, &paths, &output),
+        Commands::Export(args) => commands::run_export(args, &paths, &output),
+        Commands::Topic(args) => commands::run_topic(args, &paths, &output),
+        Commands::Translation(args) => commands::run_translation(args, &paths),
         Commands::Completions(_) => unreachable!("handled above"),
     }
 }

@@ -25,6 +25,10 @@ pub struct Cli {
     #[arg(long, global = true, conflicts_with_all = ["format", "json"])]
     pub raw: bool,
 
+    /// Translation id to read from (default: configured default, else "kjv").
+    #[arg(short = 't', long, global = true, value_name = "ID")]
+    pub translation: Option<String>,
+
     #[command(subcommand)]
     pub command: Commands,
 }
@@ -53,8 +57,101 @@ pub enum Commands {
     Cache(CacheArgs),
     Ai(AiArgs),
     Tui(TuiArgs),
+    /// Compare a passage across translations side by side.
+    Parallel(ParallelArgs),
+    /// Export a passage to Markdown, Anki, JSON, or plain text.
+    Export(ExportArgs),
+    /// Curated topical verse collections for study.
+    Topic(TopicArgs),
+    /// Manage installed translations.
+    Translation(TranslationArgs),
     /// Generate a shell completion script (bash, zsh, fish, powershell, elvish).
     Completions(CompletionsArgs),
+}
+
+#[derive(Args)]
+pub struct ParallelArgs {
+    #[arg(required = true)]
+    pub reference: Vec<String>,
+
+    /// Comma-separated translation ids to compare (e.g. `kjv,bbe`).
+    #[arg(long, value_name = "IDS")]
+    pub with: String,
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
+pub enum ExportTarget {
+    /// Markdown with a heading and verses.
+    Md,
+    /// Anki-importable TSV (reference<TAB>text).
+    Anki,
+    /// JSON array of verse records.
+    Json,
+    /// Plain text, one verse per line.
+    Txt,
+}
+
+#[derive(Args)]
+pub struct ExportArgs {
+    #[arg(required = true)]
+    pub reference: Vec<String>,
+
+    /// Export target format.
+    #[arg(long, value_enum, default_value_t = ExportTarget::Md)]
+    pub to: ExportTarget,
+}
+
+#[derive(Args)]
+pub struct TopicArgs {
+    pub topic: Option<String>,
+
+    /// List available topics.
+    #[arg(long)]
+    pub list: bool,
+
+    /// Print only references, not verse text.
+    #[arg(long)]
+    pub refs_only: bool,
+}
+
+#[derive(Args)]
+pub struct TranslationArgs {
+    #[command(subcommand)]
+    pub action: TranslationAction,
+}
+
+#[derive(Subcommand)]
+pub enum TranslationAction {
+    /// List installed translations.
+    List,
+    /// Download and install a translation.
+    Add(TranslationAddArgs),
+    /// Set the default translation.
+    Default(TranslationDefaultArgs),
+    /// Remove an installed translation.
+    Remove(TranslationRemoveArgs),
+}
+
+#[derive(Args)]
+pub struct TranslationAddArgs {
+    /// Translation id (e.g. `bbe`). Known ids install without `--source`.
+    pub id: String,
+
+    /// Source URL or file path (required for unknown ids).
+    #[arg(long)]
+    pub source: Option<String>,
+}
+
+#[derive(Args)]
+pub struct TranslationDefaultArgs {
+    /// Translation id to set as default.
+    pub id: String,
+}
+
+#[derive(Args)]
+pub struct TranslationRemoveArgs {
+    /// Translation id to remove.
+    pub id: String,
 }
 
 #[derive(Copy, Clone, Debug, ValueEnum)]

@@ -43,6 +43,13 @@ struct VerseRecord<'a> {
     text: &'a str,
 }
 
+/// Serialize verses to a pretty JSON array of records (id, reference, fields).
+/// Independent of the active output format — used by `export --to json`.
+pub fn verses_to_json(verses: &[&Verse]) -> String {
+    let records: Vec<VerseRecord> = verses.iter().map(|v| VerseRecord::new(v)).collect();
+    serde_json::to_string_pretty(&records).unwrap_or_else(|_| "[]".to_string())
+}
+
 impl<'a> VerseRecord<'a> {
     fn new(v: &'a Verse) -> Self {
         Self {
@@ -219,6 +226,20 @@ impl OutputStyle {
             );
         } else {
             println!("Chat mode. /help for commands, /exit to quit.");
+        }
+    }
+
+    /// Print a passage reference as a heading (colorized when enabled).
+    pub fn print_reference_heading(&self, reference: &str) {
+        if self.color {
+            println!(
+                "{}{}{}",
+                SetForegroundColor(self.theme.reference),
+                reference,
+                ResetColor
+            );
+        } else {
+            println!("{}", reference);
         }
     }
 

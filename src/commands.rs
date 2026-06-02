@@ -9,22 +9,29 @@ use std::io::{self, Write};
 use tokio::io::{AsyncBufReadExt, BufReader};
 
 use crate::ai::{AiProvider, ChatMessage, ProviderRequest, StreamEvent};
-use crate::books::{is_old_testament, normalize_book};
-use crate::cache::{preload_kjv, read_manifest, CachePaths};
+use crate::books::{is_old_testament, normalize_book, osis_code};
+use crate::cache::{
+    installed_translations, preload, read_manifest, remove_translation, save_default_translation,
+    CachePaths,
+};
 use crate::cli::{
-    AiArgs, CacheArgs, EchoArgs, MoodArgs, RandomArgs, ReadArgs, SearchArgs, Testament, TodayArgs,
+    AiArgs, CacheArgs, EchoArgs, ExportArgs, ExportTarget, MoodArgs, ParallelArgs, RandomArgs,
+    ReadArgs, SearchArgs, Testament, TodayArgs, TopicArgs, TranslationAction, TranslationArgs,
     TuiArgs,
 };
 use crate::moods::{all_moods, find_mood};
 use crate::output::{MarkdownRenderer, OutputStyle, ThinkingIndicator};
 use crate::reference::{parse_reference, ReferenceQuery};
+use crate::topics::{all_topics, find_topic};
 use crate::tui;
 use crate::verses::{load_verses, max_chapter, Verse, VerseIndex};
 
 pub fn run_cache(args: &CacheArgs, paths: &CachePaths) -> Result<()> {
+    let id = &paths.translation;
+
     if args.preload {
-        let count = preload_kjv(paths, args.source.as_deref())?;
-        println!("KJV cached: {} verses", count);
+        let count = preload(paths, id, args.source.as_deref())?;
+        println!("{} cached: {} verses", id.to_uppercase(), count);
         return Ok(());
     }
 
@@ -33,64 +40,50 @@ pub fn run_cache(args: &CacheArgs, paths: &CachePaths) -> Result<()> {
     }
 
     println!("Cache root: {}", paths.root.display());
-    if paths.verses_path.exists() {
-        if let Some(manifest) = read_manifest(&paths.manifest_path) {
-            println!("KJV: ready ({} verses)", manifest.verse_count);
+    if paths.verses_path().exists() {
+        if let Some(manifest) = read_manifest(&paths.manifest_path()) {
+            println!(
+                "{}: ready ({} verses)",
+                id.to_uppercase(),
+                manifest.verse_count
+            );
             println!("Source: {}", manifest.source);
             println!("Updated: {}", manifest.created_at);
         } else {
-            println!("KJV: ready");
+            println!("{}: ready", id.to_uppercase());
         }
     } else {
-        println!("KJV: missing. Run `bible cache --preload`.");
+        println!(
+            "{}: missing. Run `bible cache --preload`.",
+            id.to_uppercase()
+        );
     }
 
     Ok(())
 }
 
 fn run_cache_status(paths: &CachePaths) -> Result<()> {
-    let translations_dir = paths.root.join("translations");
     println!("Cache root: {}", paths.root.display());
-
-    let entries = match std::fs::read_dir(&translations_dir) {
-        Ok(entries) => entries,
-        Err(_) => {
-            println!("No translations installed. Run `bible cache --preload`.");
-            return Ok(());
-        }
-    };
-
-    let mut found = false;
-    for entry in entries.flatten() {
-        if !entry.path().is_dir() {
-            continue;
-        }
-        let id = entry.file_name().to_string_lossy().to_string();
-        let verses_path = entry.path().join("verses.jsonl");
-        let manifest_path = entry.path().join("manifest.json");
-        if !verses_path.exists() {
-            continue;
-        }
-        found = true;
-        let size = std::fs::metadata(&verses_path)
-            .map(|m| m.len())
-            .unwrap_or(0);
-        match read_manifest(&manifest_path) {
+    let installed = installed_translations(paths);
+    if installed.is_empty() {
+        println!("No translations installed. Run `bible cache --preload`.");
+        return Ok(());
+    }
+    // A leading "*" marks the active translation.
+    for t in installed {
+        let marker = if t.id == paths.translation { "*" } else { " " };
+        match t.manifest {
             Some(m) => println!(
-                "{:<6} {} verses, {}  (updated {})",
-                id,
+                "{} {:<6} {} verses, {}  (updated {})",
+                marker,
+                t.id,
                 m.verse_count,
-                human_size(size),
+                human_size(t.size_bytes),
                 m.created_at
             ),
-            None => println!("{:<6} {}", id, human_size(size)),
+            None => println!("{} {:<6} {}", marker, t.id, human_size(t.size_bytes)),
         }
     }
-
-    if !found {
-        println!("No translations installed. Run `bible cache --preload`.");
-    }
-
     Ok(())
 }
 
@@ -109,10 +102,19 @@ fn human_size(bytes: u64) -> String {
     }
 }
 
+/// "Not cached" hint that names the translation and how to install it.
+fn missing_cache_msg(id: &str) -> String {
+    format!(
+        "{} not cached. Run `bible translation add {}` (or `bible cache --preload` for kjv).",
+        id.to_uppercase(),
+        id
+    )
+}
+
 pub fn run_read(args: &ReadArgs, paths: &CachePaths, output: &OutputStyle) -> Result<()> {
     let reference = parse_reference(&args.reference)?;
     let verses =
-        load_verses(&paths.verses_path).context("KJV not cached. Run `bible cache --preload`.")?;
+        load_verses(&paths.verses_path()).with_context(|| missing_cache_msg(&paths.translation))?;
     let index = VerseIndex::build(&verses);
 
     // Whole-book reference: a chapter overview in the human view, or the full
@@ -143,7 +145,7 @@ fn book_verses<'a>(verses: &'a [Verse], book: &str) -> Vec<&'a Verse> {
 
 pub fn run_search(args: &SearchArgs, paths: &CachePaths, output: &OutputStyle) -> Result<()> {
     let verses =
-        load_verses(&paths.verses_path).context("KJV not cached. Run `bible cache --preload`.")?;
+        load_verses(&paths.verses_path()).with_context(|| missing_cache_msg(&paths.translation))?;
 
     let book_filter = match args.book.as_ref() {
         Some(book) => {
@@ -228,7 +230,7 @@ fn build_matcher(args: &SearchArgs) -> Result<Matcher> {
 
 pub fn run_today(args: &TodayArgs, paths: &CachePaths, output: &OutputStyle) -> Result<()> {
     let verses =
-        load_verses(&paths.verses_path).context("KJV not cached. Run `bible cache --preload`.")?;
+        load_verses(&paths.verses_path()).with_context(|| missing_cache_msg(&paths.translation))?;
 
     let book_filter = normalize_book_filter(args.book.as_deref())?;
     let pool = filter_verses(&verses, book_filter.as_deref(), args.testament);
@@ -249,7 +251,7 @@ pub fn run_today(args: &TodayArgs, paths: &CachePaths, output: &OutputStyle) -> 
 
 pub fn run_random(args: &RandomArgs, paths: &CachePaths, output: &OutputStyle) -> Result<()> {
     let verses =
-        load_verses(&paths.verses_path).context("KJV not cached. Run `bible cache --preload`.")?;
+        load_verses(&paths.verses_path()).with_context(|| missing_cache_msg(&paths.translation))?;
 
     let book_filter = normalize_book_filter(args.book.as_deref())?;
     let mut pool = filter_verses(&verses, book_filter.as_deref(), args.testament);
@@ -316,7 +318,7 @@ pub fn run_echo(args: &EchoArgs, paths: &CachePaths, output: &OutputStyle) -> Re
         .ok_or_else(|| anyhow::anyhow!("Verse is required"))?;
 
     let verses =
-        load_verses(&paths.verses_path).context("KJV not cached. Run `bible cache --preload`.")?;
+        load_verses(&paths.verses_path()).with_context(|| missing_cache_msg(&paths.translation))?;
 
     let mut chapter_verses: Vec<&Verse> = verses
         .iter()
@@ -364,7 +366,7 @@ pub fn run_mood(args: &MoodArgs, paths: &CachePaths, output: &OutputStyle) -> Re
         find_mood(mood_name).ok_or_else(|| anyhow::anyhow!("Unknown mood: {}", mood_name))?;
 
     let verses =
-        load_verses(&paths.verses_path).context("KJV not cached. Run `bible cache --preload`.")?;
+        load_verses(&paths.verses_path()).with_context(|| missing_cache_msg(&paths.translation))?;
     let index = VerseIndex::build(&verses);
 
     let selected: Vec<&Verse> = mood
@@ -384,7 +386,7 @@ pub fn run_mood(args: &MoodArgs, paths: &CachePaths, output: &OutputStyle) -> Re
 pub async fn run_ai(args: &AiArgs, paths: &CachePaths, output: &OutputStyle) -> Result<()> {
     let reference = parse_reference(&args.reference)?;
     let verses =
-        load_verses(&paths.verses_path).context("KJV not cached. Run `bible cache --preload`.")?;
+        load_verses(&paths.verses_path()).with_context(|| missing_cache_msg(&paths.translation))?;
 
     let selected = select_ai_verses(&verses, &reference, args.window)?;
 
@@ -737,9 +739,258 @@ fn contains_markdown(text: &str) -> bool {
         || text.contains("> ")
 }
 
+/// Resolve a reference to verses, handling whole-book references (which `read`
+/// renders as an overview but `export`/`parallel` treat as the full book).
+fn resolve_selection<'a>(
+    index: &VerseIndex<'a>,
+    verses: &'a [Verse],
+    reference: &ReferenceQuery,
+) -> Result<Vec<&'a Verse>> {
+    if reference.chapter.is_none() {
+        let bv = book_verses(verses, &reference.book);
+        if bv.is_empty() {
+            bail!("Book not found: {}", reference.book);
+        }
+        Ok(bv)
+    } else {
+        index.resolve(reference)
+    }
+}
+
+/// A human label for a contiguous selection, e.g. `John 3:16` or `John 3:16-18`.
+fn passage_label(selected: &[&Verse]) -> String {
+    match (selected.first(), selected.last()) {
+        (Some(first), Some(last)) if selected.len() > 1 => {
+            if first.chapter == last.chapter {
+                format!(
+                    "{} {}:{}-{}",
+                    first.book, first.chapter, first.verse, last.verse
+                )
+            } else {
+                format!(
+                    "{} {}:{}-{}:{}",
+                    first.book, first.chapter, first.verse, last.chapter, last.verse
+                )
+            }
+        }
+        (Some(first), _) => format!("{} {}:{}", first.book, first.chapter, first.verse),
+        _ => String::new(),
+    }
+}
+
+pub fn run_topic(args: &TopicArgs, paths: &CachePaths, output: &OutputStyle) -> Result<()> {
+    if args.list || args.topic.is_none() {
+        println!("Available topics:");
+        for t in all_topics() {
+            println!("- {}: {}", t.name, t.description);
+        }
+        return Ok(());
+    }
+
+    let name = args.topic.as_ref().unwrap();
+    let topic = find_topic(name).ok_or_else(|| anyhow::anyhow!("Unknown topic: {}", name))?;
+
+    if args.refs_only {
+        for r in topic.refs {
+            println!("{} {}:{}", r.book, r.chapter, r.verse);
+        }
+        return Ok(());
+    }
+
+    let verses =
+        load_verses(&paths.verses_path()).with_context(|| missing_cache_msg(&paths.translation))?;
+    let index = VerseIndex::build(&verses);
+    let selected: Vec<&Verse> = topic
+        .refs
+        .iter()
+        .filter_map(|r| index.get(r.book, r.chapter, r.verse))
+        .collect();
+
+    if !output.is_structured() {
+        println!("Topic: {}", topic.name);
+    }
+    output.emit_verses(&selected);
+    Ok(())
+}
+
+pub fn run_export(args: &ExportArgs, paths: &CachePaths, output: &OutputStyle) -> Result<()> {
+    let reference = parse_reference(&args.reference)?;
+    let verses =
+        load_verses(&paths.verses_path()).with_context(|| missing_cache_msg(&paths.translation))?;
+    let index = VerseIndex::build(&verses);
+    let selected = resolve_selection(&index, &verses, &reference)?;
+    let _ = output; // export format is controlled by --to, not the global format
+
+    match args.to {
+        ExportTarget::Md => {
+            println!(
+                "## {} ({})",
+                passage_label(&selected),
+                paths.translation.to_uppercase()
+            );
+            println!();
+            for v in &selected {
+                println!("**{} {}:{}** {}", v.book, v.chapter, v.verse, v.text);
+                println!();
+            }
+        }
+        ExportTarget::Anki => {
+            for v in &selected {
+                // front<TAB>back; tabs/newlines in text are unlikely but stripped.
+                let text = v.text.replace(['\t', '\n'], " ");
+                println!("{} {}:{}\t{}", v.book, v.chapter, v.verse, text);
+            }
+        }
+        ExportTarget::Json => {
+            println!("{}", crate::output::verses_to_json(&selected));
+        }
+        ExportTarget::Txt => {
+            for v in &selected {
+                println!("{}", v.text);
+            }
+        }
+    }
+    Ok(())
+}
+
+pub fn run_parallel(args: &ParallelArgs, paths: &CachePaths, output: &OutputStyle) -> Result<()> {
+    let reference = parse_reference(&args.reference)?;
+
+    let ids: Vec<String> = args
+        .with
+        .split(',')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+    if ids.is_empty() {
+        bail!("Provide translations to compare, e.g. --with kjv,bbe");
+    }
+
+    // Load every requested translation up front.
+    let mut loaded: Vec<Vec<Verse>> = Vec::with_capacity(ids.len());
+    for id in &ids {
+        if !paths.is_installed(id) {
+            bail!(
+                "{} is not installed. Run `bible translation add {}`.",
+                id.to_uppercase(),
+                id
+            );
+        }
+        loaded.push(load_verses(&paths.verses_path_for(id))?);
+    }
+    let indexes: Vec<VerseIndex> = loaded.iter().map(|v| VerseIndex::build(v)).collect();
+
+    // The first translation defines the versification we iterate over.
+    let base = resolve_selection(&indexes[0], &loaded[0], &reference)?;
+
+    if output.is_structured() {
+        let mut arr = Vec::new();
+        for v in &base {
+            let mut obj = serde_json::Map::new();
+            obj.insert(
+                "id".into(),
+                serde_json::Value::String(format!(
+                    "{}.{}.{}",
+                    osis_code(&v.book),
+                    v.chapter,
+                    v.verse
+                )),
+            );
+            obj.insert(
+                "reference".into(),
+                serde_json::Value::String(format!("{} {}:{}", v.book, v.chapter, v.verse)),
+            );
+            let mut tx = serde_json::Map::new();
+            for (i, id) in ids.iter().enumerate() {
+                let text = indexes[i].get(&v.book, v.chapter, v.verse);
+                tx.insert(
+                    id.clone(),
+                    match text {
+                        Some(t) => serde_json::Value::String(t.text.clone()),
+                        None => serde_json::Value::Null,
+                    },
+                );
+            }
+            obj.insert("translations".into(), serde_json::Value::Object(tx));
+            arr.push(serde_json::Value::Object(obj));
+        }
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::Value::Array(arr))
+                .unwrap_or_else(|_| "[]".to_string())
+        );
+        return Ok(());
+    }
+
+    // Human view: per verse, the reference then each translation's text, labeled
+    // and aligned by translation id.
+    let label_width = ids.iter().map(|id| id.len()).max().unwrap_or(3);
+    for (n, v) in base.iter().enumerate() {
+        if n > 0 {
+            println!();
+        }
+        let reference = format!("{} {}:{}", v.book, v.chapter, v.verse);
+        output.print_reference_heading(&reference);
+        for (i, id) in ids.iter().enumerate() {
+            let text = indexes[i]
+                .get(&v.book, v.chapter, v.verse)
+                .map(|t| t.text.as_str())
+                .unwrap_or("(missing)");
+            println!("  {:width$}  {}", id, text, width = label_width);
+        }
+    }
+    Ok(())
+}
+
+pub fn run_translation(args: &TranslationArgs, paths: &CachePaths) -> Result<()> {
+    match &args.action {
+        TranslationAction::List => {
+            let installed = installed_translations(paths);
+            if installed.is_empty() {
+                println!("No translations installed. Run `bible cache --preload`.");
+                return Ok(());
+            }
+            for t in installed {
+                let marker = if t.id == paths.translation { "*" } else { " " };
+                let detail = t
+                    .manifest
+                    .map(|m| format!("{} verses", m.verse_count))
+                    .unwrap_or_default();
+                println!("{} {:<6} {}", marker, t.id, detail);
+            }
+            Ok(())
+        }
+        TranslationAction::Add(a) => {
+            let count = preload(paths, &a.id, a.source.as_deref())?;
+            println!("{} installed: {} verses", a.id.to_uppercase(), count);
+            Ok(())
+        }
+        TranslationAction::Default(a) => {
+            if !paths.is_installed(&a.id) {
+                bail!(
+                    "{} is not installed. Run `bible translation add {}` first.",
+                    a.id.to_uppercase(),
+                    a.id
+                );
+            }
+            save_default_translation(&paths.root, &a.id)?;
+            println!("Default translation set to {}", a.id);
+            Ok(())
+        }
+        TranslationAction::Remove(a) => {
+            if remove_translation(paths, &a.id)? {
+                println!("Removed {}", a.id);
+            } else {
+                println!("{} was not installed", a.id);
+            }
+            Ok(())
+        }
+    }
+}
+
 pub fn run_tui(args: &TuiArgs, paths: &CachePaths) -> Result<()> {
     let verses =
-        load_verses(&paths.verses_path).context("KJV not cached. Run `bible cache --preload`.")?;
+        load_verses(&paths.verses_path()).with_context(|| missing_cache_msg(&paths.translation))?;
 
     tui::run(verses, args.book.clone(), args.r#ref.clone())
 }
