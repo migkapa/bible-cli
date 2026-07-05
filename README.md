@@ -43,6 +43,8 @@ cargo install bible-cli
 - `bible mood <mood>` or `bible mood --list`
 - `bible topic <name>` or `bible topic --list` (curated study collections; `--refs-only`)
 - `bible parallel <reference> --with kjv,bbe` — compare translations side by side
+- `bible diff <reference> --with kjv,bbe` — word-level diff across translations
+- `bible plan list|start <id>|today|done|status|stop` — built-in reading plans
 - `bible export <reference> --to md|anki|json|txt`
 - `bible translation list|add <id> [--source]|default <id>|remove <id>`
 - `bible cache [--preload] [--source <url-or-path>] [--status]`
@@ -67,6 +69,37 @@ bible translation default bbe          # set the default
 bible -t bbe read John 3:16            # one-off override
 bible parallel John 3:16 --with kjv,bbe
 ```
+
+`bible diff` is `git diff` for scripture — a word-level collation of a passage
+across translations. Shared words are dimmed; words only in the base are red,
+words only in the compared translation are green. With `--json` it emits
+per-token `equal`/`insert`/`delete` ops:
+
+```bash
+bible diff John 3:16 --with kjv,bbe    # first id is the base
+bible diff Psalm 23 --with bbe         # single id: base = active translation
+bible diff John 3:16 --with kjv,bbe --json | jq '.[0].diffs.bbe'
+```
+
+## Reading plans
+
+Built-in reading plans turn the CLI into a daily habit. Progress lives in
+`~/.bible-cli/plan.json`; portions are derived from the cached corpus, so any
+installed translation works:
+
+```bash
+bible plan list                        # bible-1y, nt-90, gospels-30, psalms-proverbs-31
+bible plan start nt-90                 # start the New Testament in 90 days
+bible plan today                       # print today's portion (e.g. Matthew 1-2)
+bible plan done                        # check it off: "Day 1/90 done — 1% — 89 days remaining"
+bible plan status                      # progress bar, pace, start date
+bible plan stop                        # clear the active plan
+```
+
+`plan today` reads the next unread day, so a missed day is never skipped. It
+composes with the rest of the CLI: `bible plan today --refs-only` prints chapter
+references (`Matthew 5`), and the global formats work too
+(`bible plan today --format ref`, `--json`, `--raw`).
 
 ## Output formats
 

@@ -5,6 +5,7 @@ mod cli;
 mod commands;
 mod moods;
 mod output;
+mod plans;
 mod reference;
 mod topics;
 mod tui;
@@ -51,6 +52,8 @@ async fn main() -> Result<()> {
         Commands::Ai(args) => commands::run_ai(args, &paths, &output).await,
         Commands::Tui(args) => commands::run_tui(args, &paths),
         Commands::Parallel(args) => commands::run_parallel(args, &paths, &output),
+        Commands::Diff(args) => commands::run_diff(args, &paths, &output),
+        Commands::Plan(args) => commands::run_plan(args, &paths, &output),
         Commands::Export(args) => commands::run_export(args, &paths, &output),
         Commands::Topic(args) => commands::run_topic(args, &paths, &output),
         Commands::Translation(args) => commands::run_translation(args, &paths),

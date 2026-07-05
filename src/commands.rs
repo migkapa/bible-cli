@@ -1,5 +1,5 @@
 use anyhow::{bail, Context, Result};
-use chrono::{Datelike, Local};
+use chrono::{Datelike, Local, NaiveDate};
 use futures::StreamExt;
 use rand::rngs::StdRng;
 use rand::seq::SliceRandom;
@@ -15,12 +15,16 @@ use crate::cache::{
     CachePaths,
 };
 use crate::cli::{
-    AiArgs, CacheArgs, EchoArgs, ExportArgs, ExportTarget, MoodArgs, ParallelArgs, RandomArgs,
-    ReadArgs, SearchArgs, Testament, TodayArgs, TopicArgs, TranslationAction, TranslationArgs,
-    TuiArgs,
+    AiArgs, CacheArgs, DiffArgs, EchoArgs, ExportArgs, ExportTarget, MoodArgs, ParallelArgs,
+    PlanAction, PlanArgs, PlanDoneArgs, PlanTodayArgs, RandomArgs, ReadArgs, SearchArgs, Testament,
+    TodayArgs, TopicArgs, TranslationAction, TranslationArgs, TuiArgs,
 };
 use crate::moods::{all_moods, find_mood};
 use crate::output::{MarkdownRenderer, OutputStyle, ThinkingIndicator};
+use crate::plans::{
+    all_plans, build_days, clear_state, find_plan, load_state, portion_label, save_state, PlanDef,
+    PlanState,
+};
 use crate::reference::{parse_reference, ReferenceQuery};
 use crate::topics::{all_topics, find_topic};
 use crate::tui;
@@ -993,4 +997,495 @@ pub fn run_tui(args: &TuiArgs, paths: &CachePaths) -> Result<()> {
         load_verses(&paths.verses_path()).with_context(|| missing_cache_msg(&paths.translation))?;
 
     tui::run(verses, args.book.clone(), args.r#ref.clone())
+}
+
+pub fn run_plan(args: &PlanArgs, paths: &CachePaths, output: &OutputStyle) -> Result<()> {
+    match &args.action {
+        PlanAction::List => {
+            let active = load_state(&paths.root);
+            println!("Available plans:");
+            for p in all_plans() {
+                let marker = match &active {
+                    Some(s) if s.plan_id == p.id => "*",
+                    _ => " ",
+                };
+                println!(
+                    "{} {:<20} {:>3} days  {} — {}",
+                    marker, p.id, p.days, p.name, p.description
+                );
+            }
+            Ok(())
+        }
+        PlanAction::Start(a) => {
+            let plan = find_plan(&a.id)
+                .ok_or_else(|| anyhow::anyhow!("Unknown plan: {}. See `bible plan list`.", a.id))?;
+            let state = PlanState {
+                plan_id: plan.id.to_string(),
+                started: Local::now().date_naive().format("%Y-%m-%d").to_string(),
+                completed: Vec::new(),
+            };
+            save_state(&paths.root, &state)?;
+            println!(
+                "Started {} ({} days). Try `bible plan today`.",
+                plan.name, plan.days
+            );
+            Ok(())
+        }
+        PlanAction::Today(a) => run_plan_today(a, paths, output),
+        PlanAction::Done(a) => run_plan_done(a, paths),
+        PlanAction::Status => run_plan_status(paths),
+        PlanAction::Stop => {
+            match load_state(&paths.root) {
+                Some(state) if clear_state(&paths.root)? => {
+                    println!("Stopped {}.", state.plan_id)
+                }
+                _ => println!("No active plan."),
+            }
+            Ok(())
+        }
+    }
+}
+
+/// Load the active plan state and its definition, or fail with a start hint.
+fn active_plan(paths: &CachePaths) -> Result<(PlanState, &'static PlanDef)> {
+    let state = load_state(&paths.root).ok_or_else(|| {
+        anyhow::anyhow!("No active plan. Try: bible plan start nt-90 (see `bible plan list`)")
+    })?;
+    let plan = find_plan(&state.plan_id).ok_or_else(|| {
+        anyhow::anyhow!(
+            "Active plan '{}' is unknown; run `bible plan stop` and start a new one.",
+            state.plan_id
+        )
+    })?;
+    Ok((state, plan))
+}
+
+/// The scheduled day number for today (1 on the start date), clamped to the plan.
+fn scheduled_day(state: &PlanState, plan: &PlanDef) -> u32 {
+    let today = Local::now().date_naive();
+    let started = NaiveDate::parse_from_str(&state.started, "%Y-%m-%d").unwrap_or(today);
+    let elapsed = (today - started).num_days() + 1;
+    elapsed.clamp(1, plan.days as i64) as u32
+}
+
+fn run_plan_today(args: &PlanTodayArgs, paths: &CachePaths, output: &OutputStyle) -> Result<()> {
+    let (state, plan) = active_plan(paths)?;
+
+    let day = match args.day {
+        Some(day) => {
+            if day == 0 || day > plan.days {
+                bail!("{} has days 1-{}.", plan.name, plan.days);
+            }
+            day
+        }
+        None => match state.next_day(plan.days) {
+            Some(day) => day,
+            None => {
+                println!(
+                    "{} is complete — all {} days read. Try `bible plan start <id>` for the next one.",
+                    plan.name, plan.days
+                );
+                return Ok(());
+            }
+        },
+    };
+
+    let verses =
+        load_verses(&paths.verses_path()).with_context(|| missing_cache_msg(&paths.translation))?;
+    let days = build_days(plan, &verses)?;
+    let portion = &days[(day - 1) as usize];
+
+    if args.refs_only {
+        for c in portion {
+            println!("{} {}", c.book, c.chapter);
+        }
+        return Ok(());
+    }
+
+    if !output.is_structured() {
+        output.print_reference_heading(&format!(
+            "{} — Day {}/{}: {}",
+            plan.name,
+            day,
+            plan.days,
+            portion_label(portion)
+        ));
+        let behind = scheduled_day(&state, plan) as i64 - day as i64;
+        if behind > 0 {
+            output.print_dim(&format!(
+                "({} day{} behind — read on!)",
+                behind,
+                if behind == 1 { "" } else { "s" }
+            ));
+        }
+        println!();
+    }
+
+    let index = VerseIndex::build(&verses);
+    let mut selected: Vec<&Verse> = Vec::new();
+    for c in portion {
+        selected.extend(index.chapter(c.book, c.chapter));
+    }
+    output.emit_verses(&selected);
+    Ok(())
+}
+
+fn run_plan_done(args: &PlanDoneArgs, paths: &CachePaths) -> Result<()> {
+    let (mut state, plan) = active_plan(paths)?;
+
+    let day = match args.day {
+        Some(day) => {
+            if day == 0 || day > plan.days {
+                bail!("{} has days 1-{}.", plan.name, plan.days);
+            }
+            day
+        }
+        None => match state.next_day(plan.days) {
+            Some(day) => day,
+            None => {
+                println!("{} is already complete.", plan.name);
+                return Ok(());
+            }
+        },
+    };
+
+    if !state.completed.contains(&day) {
+        state.completed.push(day);
+        state.completed.sort_unstable();
+        save_state(&paths.root, &state)?;
+    }
+
+    let done = state.done_count(plan.days);
+    let remaining = plan.days - done;
+    println!(
+        "Day {}/{} done — {}% — {} day{} remaining",
+        day,
+        plan.days,
+        done * 100 / plan.days,
+        remaining,
+        if remaining == 1 { "" } else { "s" }
+    );
+    if remaining == 0 {
+        println!("{} complete. Well done!", plan.name);
+    }
+    Ok(())
+}
+
+fn run_plan_status(paths: &CachePaths) -> Result<()> {
+    let (state, plan) = active_plan(paths)?;
+
+    let done = state.done_count(plan.days);
+    const BAR_WIDTH: u32 = 30;
+    let filled = (done * BAR_WIDTH / plan.days) as usize;
+    let bar = "█".repeat(filled) + &"░".repeat(BAR_WIDTH as usize - filled);
+
+    println!("{} ({})", plan.name, plan.id);
+    println!(
+        "[{}] {}/{} days ({}%)",
+        bar,
+        done,
+        plan.days,
+        done * 100 / plan.days
+    );
+    println!("Started {}", state.started);
+
+    let scheduled = scheduled_day(&state, plan);
+    if done >= plan.days {
+        println!("Complete. Well done!");
+    } else if done + 1 >= scheduled {
+        println!("On pace.");
+    } else {
+        let behind = scheduled - done - 1;
+        println!(
+            "Behind by {} day{} — next up: day {}.",
+            behind,
+            if behind == 1 { "" } else { "s" },
+            state.next_day(plan.days).unwrap_or(plan.days)
+        );
+    }
+    Ok(())
+}
+
+/// One token-level edit between a base verse and another translation's verse.
+enum DiffOp<'a> {
+    Equal { base_idx: usize, text: &'a str },
+    Insert { text: &'a str },
+    Delete { text: &'a str },
+}
+
+/// Case- and punctuation-insensitive token key, so "world," matches "world".
+fn token_key(token: &str) -> String {
+    token
+        .chars()
+        .filter(|c| c.is_alphanumeric())
+        .flat_map(|c| c.to_lowercase())
+        .collect()
+}
+
+/// Token-level LCS diff from `base` to `other`. Equal ops carry the other
+/// translation's surface form (punctuation may differ) plus the base index.
+fn diff_tokens<'a>(base: &[&'a str], other: &[&'a str]) -> Vec<DiffOp<'a>> {
+    let base_keys: Vec<String> = base.iter().map(|t| token_key(t)).collect();
+    let other_keys: Vec<String> = other.iter().map(|t| token_key(t)).collect();
+    let (n, m) = (base.len(), other.len());
+
+    let idx = |i: usize, j: usize| i * (m + 1) + j;
+    let mut dp = vec![0usize; (n + 1) * (m + 1)];
+    for i in 1..=n {
+        for j in 1..=m {
+            dp[idx(i, j)] = if base_keys[i - 1] == other_keys[j - 1] {
+                dp[idx(i - 1, j - 1)] + 1
+            } else {
+                dp[idx(i - 1, j)].max(dp[idx(i, j - 1)])
+            };
+        }
+    }
+
+    let mut ops = Vec::new();
+    let (mut i, mut j) = (n, m);
+    while i > 0 || j > 0 {
+        if i > 0 && j > 0 && base_keys[i - 1] == other_keys[j - 1] {
+            ops.push(DiffOp::Equal {
+                base_idx: i - 1,
+                text: other[j - 1],
+            });
+            i -= 1;
+            j -= 1;
+        } else if j > 0 && (i == 0 || dp[idx(i, j - 1)] >= dp[idx(i - 1, j)]) {
+            ops.push(DiffOp::Insert { text: other[j - 1] });
+            j -= 1;
+        } else {
+            ops.push(DiffOp::Delete { text: base[i - 1] });
+            i -= 1;
+        }
+    }
+    ops.reverse();
+    ops
+}
+
+pub fn run_diff(args: &DiffArgs, paths: &CachePaths, output: &OutputStyle) -> Result<()> {
+    let reference = parse_reference(&args.reference)?;
+
+    let mut ids: Vec<String> = args
+        .with
+        .split(',')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+    // A single id is diffed against the active translation.
+    if ids.len() == 1 {
+        ids.insert(0, paths.translation.clone());
+    }
+    let mut seen = std::collections::HashSet::new();
+    ids.retain(|id| seen.insert(id.clone()));
+    if ids.len() < 2 {
+        bail!("Provide at least two distinct translations, e.g. --with kjv,bbe");
+    }
+
+    let mut loaded: Vec<Vec<Verse>> = Vec::with_capacity(ids.len());
+    for id in &ids {
+        if !paths.is_installed(id) {
+            bail!(
+                "{} is not installed. Run `bible translation add {}`.",
+                id.to_uppercase(),
+                id
+            );
+        }
+        loaded.push(load_verses(&paths.verses_path_for(id))?);
+    }
+    let indexes: Vec<VerseIndex> = loaded.iter().map(|v| VerseIndex::build(v)).collect();
+
+    // The first translation is the base; it defines versification and word order.
+    let base = resolve_selection(&indexes[0], &loaded[0], &reference)?;
+    let others = &ids[1..];
+
+    if output.is_structured() {
+        let mut arr = Vec::new();
+        for v in &base {
+            let base_tokens: Vec<&str> = v.text.split_whitespace().collect();
+            let mut obj = serde_json::Map::new();
+            obj.insert(
+                "id".into(),
+                serde_json::Value::String(format!(
+                    "{}.{}.{}",
+                    osis_code(&v.book),
+                    v.chapter,
+                    v.verse
+                )),
+            );
+            obj.insert(
+                "reference".into(),
+                serde_json::Value::String(format!("{} {}:{}", v.book, v.chapter, v.verse)),
+            );
+            obj.insert("base".into(), serde_json::Value::String(ids[0].clone()));
+            let mut diffs = serde_json::Map::new();
+            for (i, id) in others.iter().enumerate() {
+                let value = match indexes[i + 1].get(&v.book, v.chapter, v.verse) {
+                    Some(other) => {
+                        let other_tokens: Vec<&str> = other.text.split_whitespace().collect();
+                        let ops: Vec<serde_json::Value> = diff_tokens(&base_tokens, &other_tokens)
+                            .iter()
+                            .map(|op| {
+                                let (name, text) = match op {
+                                    DiffOp::Equal { text, .. } => ("equal", *text),
+                                    DiffOp::Insert { text } => ("insert", *text),
+                                    DiffOp::Delete { text } => ("delete", *text),
+                                };
+                                serde_json::json!({ "op": name, "text": text })
+                            })
+                            .collect();
+                        serde_json::Value::Array(ops)
+                    }
+                    None => serde_json::Value::Null,
+                };
+                diffs.insert(id.clone(), value);
+            }
+            obj.insert("diffs".into(), serde_json::Value::Object(diffs));
+            arr.push(serde_json::Value::Object(obj));
+        }
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::Value::Array(arr))
+                .unwrap_or_else(|_| "[]".to_string())
+        );
+        return Ok(());
+    }
+
+    // Human view: per verse, the base line with removals highlighted, then each
+    // other translation with additions highlighted; shared words are dimmed.
+    let label_width = ids.iter().map(|id| id.len()).max().unwrap_or(3);
+    for (n, v) in base.iter().enumerate() {
+        if n > 0 {
+            println!();
+        }
+        output.print_reference_heading(&format!("{} {}:{}", v.book, v.chapter, v.verse));
+
+        let base_tokens: Vec<&str> = v.text.split_whitespace().collect();
+        let per_other: Vec<Option<Vec<DiffOp>>> = others
+            .iter()
+            .enumerate()
+            .map(|(i, _)| {
+                indexes[i + 1].get(&v.book, v.chapter, v.verse).map(|o| {
+                    let other_tokens: Vec<&str> = o.text.split_whitespace().collect();
+                    diff_tokens(&base_tokens, &other_tokens)
+                })
+            })
+            .collect();
+
+        // A base token is "common" when every present translation keeps it.
+        let mut common = vec![true; base_tokens.len()];
+        let mut any_present = false;
+        for ops in per_other.iter().flatten() {
+            any_present = true;
+            let mut kept = vec![false; base_tokens.len()];
+            for op in ops {
+                if let DiffOp::Equal { base_idx, .. } = op {
+                    kept[*base_idx] = true;
+                }
+            }
+            for (c, k) in common.iter_mut().zip(&kept) {
+                *c &= k;
+            }
+        }
+
+        let base_line: Vec<String> = base_tokens
+            .iter()
+            .enumerate()
+            .map(|(i, t)| {
+                if !any_present || !common[i] {
+                    output.removed_span(t)
+                } else {
+                    output.dim_span(t)
+                }
+            })
+            .collect();
+        println!(
+            "  {:width$}  {}",
+            ids[0],
+            base_line.join(" "),
+            width = label_width
+        );
+
+        for (i, id) in others.iter().enumerate() {
+            match &per_other[i] {
+                Some(ops) => {
+                    let line: Vec<String> = ops
+                        .iter()
+                        .filter_map(|op| match op {
+                            DiffOp::Equal { text, .. } => Some(output.dim_span(text)),
+                            DiffOp::Insert { text } => Some(output.added_span(text)),
+                            DiffOp::Delete { .. } => None,
+                        })
+                        .collect();
+                    println!("  {:width$}  {}", id, line.join(" "), width = label_width);
+                }
+                None => println!("  {:width$}  (missing)", id, width = label_width),
+            }
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn ops_summary(base: &str, other: &str) -> Vec<(char, String)> {
+        let base_tokens: Vec<&str> = base.split_whitespace().collect();
+        let other_tokens: Vec<&str> = other.split_whitespace().collect();
+        diff_tokens(&base_tokens, &other_tokens)
+            .iter()
+            .map(|op| match op {
+                DiffOp::Equal { text, .. } => ('=', text.to_string()),
+                DiffOp::Insert { text } => ('+', text.to_string()),
+                DiffOp::Delete { text } => ('-', text.to_string()),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn diff_identical_text_is_all_equal() {
+        let ops = ops_summary("For God so loved", "For God so loved");
+        assert!(ops.iter().all(|(op, _)| *op == '='));
+        assert_eq!(ops.len(), 4);
+    }
+
+    #[test]
+    fn diff_marks_insertions_and_deletions() {
+        let ops = ops_summary("the only begotten Son", "the only Son");
+        assert_eq!(
+            ops,
+            vec![
+                ('=', "the".to_string()),
+                ('=', "only".to_string()),
+                ('-', "begotten".to_string()),
+                ('=', "Son".to_string()),
+            ]
+        );
+
+        let ops = ops_summary("he gave", "he freely gave");
+        assert_eq!(
+            ops,
+            vec![
+                ('=', "he".to_string()),
+                ('+', "freely".to_string()),
+                ('=', "gave".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn diff_ignores_case_and_punctuation_for_matching() {
+        // "world," matches "World" — equal ops keep the other's surface form.
+        let ops = ops_summary("the world, he", "the World he");
+        assert!(ops.iter().all(|(op, _)| *op == '='));
+        assert_eq!(ops[1].1, "World");
+    }
+
+    #[test]
+    fn diff_handles_empty_sides() {
+        assert!(ops_summary("", "").is_empty());
+        assert!(ops_summary("a b", "").iter().all(|(op, _)| *op == '-'));
+        assert!(ops_summary("", "a b").iter().all(|(op, _)| *op == '+'));
+    }
 }

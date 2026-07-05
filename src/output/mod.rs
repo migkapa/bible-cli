@@ -243,6 +243,30 @@ impl OutputStyle {
         }
     }
 
+    /// Dim an inline span when color is enabled (diff: words shared between
+    /// translations).
+    pub fn dim_span(&self, text: &str) -> String {
+        self.span(text, self.theme.dim)
+    }
+
+    /// Highlight a span present only in the compared translation (diff: additions).
+    pub fn added_span(&self, text: &str) -> String {
+        self.span(text, Color::Green)
+    }
+
+    /// Highlight a span present only in the base translation (diff: removals).
+    pub fn removed_span(&self, text: &str) -> String {
+        self.span(text, Color::Red)
+    }
+
+    fn span(&self, text: &str, color: Color) -> String {
+        if self.color {
+            format!("{}{}{}", SetForegroundColor(color), text, ResetColor)
+        } else {
+            text.to_string()
+        }
+    }
+
     pub fn print_dim(&self, text: &str) {
         if self.color {
             println!(

@@ -39,6 +39,7 @@ This is a Rust CLI application for reading the King James Version (KJV) Bible. T
 - `ai/mod.rs`: OpenAI and Anthropic API clients with a `ProviderClient` trait
 - `moods.rs`: Predefined verse collections for moods like "peace", "courage", "wisdom"
 - `topics.rs`: Curated doctrinal/study verse collections (faith, grace, salvation, ...), same shape as `moods.rs`
+- `plans.rs`: Built-in reading plans (`bible-1y`, `nt-90`, `gospels-30`, `psalms-proverbs-31`). Day portions are derived from the cached corpus at runtime (`build_days` chunks chapters evenly), so any installed translation works; progress persists in `~/.bible-cli/plan.json` (`PlanState`)
 - `output/mod.rs`: Terminal color handling with ANSI codes (respects NO_COLOR and TERM=dumb) and the `Format` enum (plain/json/ndjson/tsv/ref/raw). `OutputStyle::emit_verses` is the single render path every command uses; `is_structured()` suppresses decorative output for machine formats.
 
 ### AI Integration

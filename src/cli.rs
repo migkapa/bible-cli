@@ -59,6 +59,10 @@ pub enum Commands {
     Tui(TuiArgs),
     /// Compare a passage across translations side by side.
     Parallel(ParallelArgs),
+    /// Word-level diff of a passage across translations.
+    Diff(DiffArgs),
+    /// Follow a reading plan (Bible in a year, NT in 90 days, ...).
+    Plan(PlanArgs),
     /// Export a passage to Markdown, Anki, JSON, or plain text.
     Export(ExportArgs),
     /// Curated topical verse collections for study.
@@ -77,6 +81,63 @@ pub struct ParallelArgs {
     /// Comma-separated translation ids to compare (e.g. `kjv,bbe`).
     #[arg(long, value_name = "IDS")]
     pub with: String,
+}
+
+#[derive(Args)]
+pub struct DiffArgs {
+    #[arg(required = true)]
+    pub reference: Vec<String>,
+
+    /// Comma-separated translation ids to diff; the first is the base. A single
+    /// id is diffed against the active translation (e.g. `--with bbe`).
+    #[arg(long, value_name = "IDS")]
+    pub with: String,
+}
+
+#[derive(Args)]
+pub struct PlanArgs {
+    #[command(subcommand)]
+    pub action: PlanAction,
+}
+
+#[derive(Subcommand)]
+pub enum PlanAction {
+    /// List available reading plans.
+    List,
+    /// Start a reading plan.
+    Start(PlanStartArgs),
+    /// Show today's reading portion.
+    Today(PlanTodayArgs),
+    /// Mark a day's reading as done.
+    Done(PlanDoneArgs),
+    /// Show progress through the active plan.
+    Status,
+    /// Stop the active plan and clear its progress.
+    Stop,
+}
+
+#[derive(Args)]
+pub struct PlanStartArgs {
+    /// Plan id (see `bible plan list`).
+    pub id: String,
+}
+
+#[derive(Args)]
+pub struct PlanTodayArgs {
+    /// Show a specific day instead of the next unread one.
+    #[arg(long, value_name = "N")]
+    pub day: Option<u32>,
+
+    /// Print chapter references only (e.g. `Matthew 5`), one per line.
+    #[arg(long)]
+    pub refs_only: bool,
+}
+
+#[derive(Args)]
+pub struct PlanDoneArgs {
+    /// Mark a specific day instead of the next unread one.
+    #[arg(long, value_name = "N")]
+    pub day: Option<u32>,
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
