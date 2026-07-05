@@ -198,10 +198,15 @@ Defaults to `~/.bible-cli`. Override with `--data-dir <dir>`.
 The default KJV source URL is:
 
 ```
-https://raw.githubusercontent.com/thiagobodruk/bible/master/json/en_kjv.json
+https://raw.githubusercontent.com/scrollmapper/bible_databases/master/formats/json/KJV.json
 ```
 
 You can pass a local path or your own JSONL via `--source`.
+
+> Upgrading from v0.5 or earlier? Run `bible cache --preload` (and
+> `bible translation add bbe` if installed) to refresh from the corrected
+> source — the previous one was missing Matthew 2:16 and misnumbered the
+> rest of that chapter.
 
 ## Color output
 

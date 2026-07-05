@@ -454,6 +454,12 @@ pub const BOOKS: &[BookDef] = &[
     },
     BookDef {
         name: "Revelation",
-        aliases: &["revelation", "rev", "re"],
+        aliases: &[
+            "revelation",
+            "rev",
+            "re",
+            "revelation of john",
+            "apocalypse",
+        ],
     },
 ];

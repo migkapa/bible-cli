@@ -16,11 +16,11 @@ pub const DEFAULT_TRANSLATION: &str = "kjv";
 const KNOWN_SOURCES: &[(&str, &str)] = &[
     (
         "kjv",
-        "https://raw.githubusercontent.com/thiagobodruk/bible/master/json/en_kjv.json",
+        "https://raw.githubusercontent.com/scrollmapper/bible_databases/master/formats/json/KJV.json",
     ),
     (
         "bbe",
-        "https://raw.githubusercontent.com/thiagobodruk/bible/master/json/en_bbe.json",
+        "https://raw.githubusercontent.com/scrollmapper/bible_databases/master/formats/json/BBE.json",
     ),
 ];
 
@@ -261,12 +261,14 @@ fn write_jsonl(path: &Path, verses: &[Verse]) -> Result<()> {
 
 fn normalize_source_to_verses(raw: &str) -> Result<Vec<Verse>> {
     let trimmed = strip_bom(raw).trim_start();
+    // A file starting with '{' may still be JSONL (one object per line); fall
+    // back to line parsing when it is not a single JSON document.
     if trimmed.starts_with('{') || trimmed.starts_with('[') {
-        let value: Value = serde_json::from_str(trimmed)?;
-        parse_json_value(value)
-    } else {
-        parse_jsonl(trimmed)
+        if let Ok(value) = serde_json::from_str::<Value>(trimmed) {
+            return parse_json_value(value);
+        }
     }
+    parse_jsonl(trimmed)
 }
 
 fn strip_bom(input: &str) -> &str {
@@ -350,27 +352,42 @@ fn parse_books(books: &[Value]) -> Result<Vec<Verse>> {
         };
 
         for (chapter_idx, chapter_val) in chapters.iter().enumerate() {
-            let chapter_num = (chapter_idx + 1) as u16;
-            let Some(verses_arr) = chapter_val.as_array() else {
-                continue;
+            // Chapters are either bare verse arrays (numbered by position) or
+            // objects with explicit numbers:
+            // {"chapter": 2, "verses": [{"verse": 16, "text": "..."}]}.
+            let (chapter_num, verses_arr) = match chapter_val {
+                Value::Array(arr) => ((chapter_idx + 1) as u16, arr),
+                Value::Object(obj) => {
+                    let Some(arr) = obj.get("verses").and_then(|v| v.as_array()) else {
+                        continue;
+                    };
+                    let num = extract_u16(obj, &["chapter", "chapter_id", "chapterId"])
+                        .unwrap_or((chapter_idx + 1) as u16);
+                    (num, arr)
+                }
+                _ => continue,
             };
             for (verse_idx, verse_val) in verses_arr.iter().enumerate() {
-                let verse_num = (verse_idx + 1) as u16;
-                let text = if let Some(text) = verse_val.as_str() {
-                    text.to_string()
-                } else if let Some(obj) = verse_val.as_object() {
-                    extract_string(obj, &["text", "content", "verse"]).unwrap_or_default()
-                } else {
-                    String::new()
+                let (verse_num, text) = match verse_val {
+                    Value::String(text) => ((verse_idx + 1) as u16, text.to_string()),
+                    Value::Object(obj) => {
+                        let num = extract_u16(obj, &["verse", "verse_id", "verseId", "verse_num"])
+                            .unwrap_or((verse_idx + 1) as u16);
+                        let text =
+                            extract_string(obj, &["text", "content", "verse"]).unwrap_or_default();
+                        (num, text)
+                    }
+                    _ => continue,
                 };
-                if text.trim().is_empty() {
+                let text = text.trim();
+                if text.is_empty() {
                     continue;
                 }
                 verses.push(Verse {
                     book: normalized_book.clone(),
                     chapter: chapter_num,
                     verse: verse_num,
-                    text,
+                    text: text.to_string(),
                 });
             }
         }
@@ -400,8 +417,8 @@ fn extract_verse(value: &Value) -> Option<Verse> {
         }
     }
     let text = text.unwrap_or_default();
-
-    if text.trim().is_empty() {
+    let text = text.trim();
+    if text.is_empty() {
         return None;
     }
 
@@ -409,7 +426,7 @@ fn extract_verse(value: &Value) -> Option<Verse> {
         book,
         chapter,
         verse: verse_num,
-        text,
+        text: text.to_string(),
     })
 }
 
@@ -443,4 +460,69 @@ fn extract_u16(map: &Map<String, Value>, keys: &[&str]) -> Option<u16> {
         }
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_nested_chapters_with_explicit_numbers() {
+        // scrollmapper-style: chapter objects carrying explicit chapter/verse
+        // numbers, so a gap in the source cannot shift the numbering.
+        let raw = r#"{
+            "translation": "KJV",
+            "books": [{
+                "name": "Matthew",
+                "chapters": [{
+                    "chapter": 2,
+                    "verses": [
+                        {"verse": 15, "text": "And was there until the death of Herod."},
+                        {"verse": 16, "text": "Then Herod, when he saw that he was mocked."}
+                    ]
+                }]
+            }]
+        }"#;
+        let verses = normalize_source_to_verses(raw).unwrap();
+        assert_eq!(verses.len(), 2);
+        assert_eq!(verses[1].book, "Matthew");
+        assert_eq!(verses[1].chapter, 2);
+        assert_eq!(verses[1].verse, 16);
+    }
+
+    #[test]
+    fn parses_positional_chapter_arrays() {
+        // thiagobodruk-style: chapters as bare arrays, numbered by position.
+        let raw = r#"[{
+            "name": "Genesis",
+            "chapters": [["In the beginning God created the heaven and the earth.", "And the earth was without form."]]
+        }]"#;
+        let verses = normalize_source_to_verses(raw).unwrap();
+        assert_eq!(verses.len(), 2);
+        assert_eq!(verses[0].book, "Genesis");
+        assert_eq!(verses[0].chapter, 1);
+        assert_eq!(verses[1].verse, 2);
+    }
+
+    #[test]
+    fn falls_back_to_jsonl_when_not_a_single_document() {
+        // A JSONL file starts with '{' but is not one JSON document.
+        let raw = concat!(
+            r#"{"book":"John","chapter":3,"verse":16,"text":"For God so loved the world"}"#,
+            "\n",
+            r#"{"book":"John","chapter":3,"verse":17,"text":"For God sent not his Son"}"#,
+            "\n"
+        );
+        let verses = normalize_source_to_verses(raw).unwrap();
+        assert_eq!(verses.len(), 2);
+        assert_eq!(verses[0].verse, 16);
+        assert_eq!(verses[1].verse, 17);
+    }
+
+    #[test]
+    fn known_sources_cover_default_translations() {
+        assert!(known_source("kjv").is_some());
+        assert!(known_source("bbe").is_some());
+        assert!(known_source("asv").is_none());
+    }
 }
