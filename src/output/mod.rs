@@ -51,6 +51,11 @@ pub fn verses_to_json(verses: &[&Verse]) -> String {
     serde_json::to_string_pretty(&records).unwrap_or_else(|_| "[]".to_string())
 }
 
+/// One verse as the JSON record every structured format uses.
+pub fn verse_json(v: &Verse) -> serde_json::Value {
+    serde_json::to_value(VerseRecord::new(v)).unwrap_or(serde_json::Value::Null)
+}
+
 /// Stable OSIS-style verse id for joins, e.g. `John.3.16` or `1Cor.13.4`.
 pub fn verse_id(v: &Verse) -> String {
     format!("{}.{}.{}", osis_code(&v.book), v.chapter, v.verse)
@@ -317,6 +322,11 @@ impl OutputStyle {
         self.span(text, Color::Red)
     }
 
+    /// A reference colored like verse references.
+    pub fn reference_span(&self, text: &str) -> String {
+        self.span(text, self.theme.reference)
+    }
+
     /// A word missed in a memorization quiz: red, or `[bracketed]` without color.
     pub fn missed_span(&self, text: &str) -> String {
         if self.color {
@@ -361,7 +371,8 @@ fn should_color_auto() -> bool {
     io::stdout().is_terminal()
 }
 
-fn terminal_width() -> usize {
+/// The terminal's width in columns (80 when stdout is not a terminal).
+pub fn terminal_width() -> usize {
     termimad::crossterm::terminal::size()
         .map(|(w, _)| w as usize)
         .unwrap_or(80)

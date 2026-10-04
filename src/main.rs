@@ -1,4 +1,5 @@
 mod ai;
+mod bookmarks;
 mod books;
 mod cache;
 mod cli;
@@ -82,6 +83,7 @@ async fn main() -> Result<()> {
         Commands::Topic(args) => commands::run_topic(args, &paths, &output),
         Commands::Books(args) => commands::run_books(args, &paths, &output),
         Commands::Memorize(args) => commands::run_memorize(args, &paths, &output),
+        Commands::Bookmark(args) => commands::run_bookmark(args, &paths, &output),
         Commands::Translation(args) => commands::run_translation(args, &paths),
         Commands::Completions(_) => unreachable!("handled above"),
     }

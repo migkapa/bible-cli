@@ -9,6 +9,7 @@ use std::io::{self, BufRead, Write};
 use tokio::io::{AsyncBufReadExt, BufReader};
 
 use crate::ai::{AiProvider, ChatMessage, ProviderRequest, StreamEvent};
+use crate::bookmarks::{load_bookmarks, normalize_tag, save_bookmarks, Bookmark};
 use crate::books::{is_old_testament, normalize_book, osis_code, BOOKS, OT_BOOK_COUNT};
 use crate::cache::{
     installed_translations, known_source, known_translation, known_translations,
@@ -16,17 +17,18 @@ use crate::cache::{
     save_default_translation, CachePaths, DEFAULT_TRANSLATION,
 };
 use crate::cli::{
-    AiArgs, BooksArgs, CacheArgs, DiffArgs, EchoArgs, ExportArgs, ExportTarget, MemorizeArgs,
-    MoodArgs, ParallelArgs, PlanAction, PlanArgs, PlanDoneArgs, PlanTodayArgs, PlanUndoArgs,
-    RandomArgs, ReadArgs, SearchArgs, Testament, TodayArgs, TopicArgs, TranslationAction,
-    TranslationArgs, TuiArgs,
+    AiArgs, BookmarkAction, BookmarkAddArgs, BookmarkArgs, BookmarkRemoveArgs, BooksArgs,
+    CacheArgs, DiffArgs, EchoArgs, ExportArgs, ExportTarget, MemorizeArgs, MoodArgs, ParallelArgs,
+    PlanAction, PlanArgs, PlanDoneArgs, PlanTodayArgs, PlanUndoArgs, RandomArgs, ReadArgs,
+    SearchArgs, Testament, TodayArgs, TopicArgs, TranslationAction, TranslationArgs, TuiArgs,
 };
 use crate::diff::{diff_tokens, DiffOp};
 use crate::hashing::splitmix64;
 use crate::memorize::{cloze, score_recall, verse_salt, word_count, MAX_LEVEL};
 use crate::moods::{all_moods, find_mood};
 use crate::output::{
-    verse_id, verse_reference, Format, MarkdownRenderer, OutputStyle, ThinkingIndicator,
+    terminal_width, verse_id, verse_json, verse_reference, Format, MarkdownRenderer, OutputStyle,
+    ThinkingIndicator,
 };
 use crate::plans::{
     all_plans, build_days, clear_state, find_plan, load_state, portion_label, save_state, PlanDef,
@@ -996,6 +998,226 @@ fn run_memorize_quiz(selected: &[&Verse], args: &MemorizeArgs, output: &OutputSt
     Ok(())
 }
 
+pub fn run_bookmark(args: &BookmarkArgs, paths: &CachePaths, output: &OutputStyle) -> Result<()> {
+    match &args.action {
+        Some(BookmarkAction::Add(a)) => run_bookmark_add(a, paths),
+        Some(BookmarkAction::Remove(a)) => run_bookmark_remove(a, paths),
+        Some(BookmarkAction::List(a)) => run_bookmark_list(a.tag.as_deref(), paths, output),
+        None => run_bookmark_list(None, paths, output),
+    }
+}
+
+fn run_bookmark_add(args: &BookmarkAddArgs, paths: &CachePaths) -> Result<()> {
+    let references = parse_references(&args.reference)?;
+    let verses = load_active(paths)?;
+    let index = VerseIndex::build(&verses);
+    // Store the canonical label, so "jn 3:16" and "John 3:16" are one bookmark.
+    let label = index.label(&index.resolve_all(&references)?);
+    let tags: Vec<String> = args.tags.iter().filter_map(|t| normalize_tag(t)).collect();
+    let note = args
+        .note
+        .as_deref()
+        .map(str::trim)
+        .filter(|n| !n.is_empty())
+        .map(str::to_string);
+
+    let mut bookmarks = load_bookmarks(&paths.root)?;
+    let message = match bookmarks.iter().position(|b| b.reference == label) {
+        Some(i) => {
+            let mark = &mut bookmarks[i];
+            let before = mark.clone();
+            if note.is_some() {
+                mark.note = note;
+            }
+            mark.merge_tags(&tags);
+            if *mark == before {
+                println!("Already bookmarked: #{} {}", i + 1, label);
+                return Ok(());
+            }
+            format!("Updated #{} {}", i + 1, label)
+        }
+        None => {
+            bookmarks.push(Bookmark {
+                reference: label.clone(),
+                note,
+                tags,
+                added: Local::now().date_naive().format("%Y-%m-%d").to_string(),
+            });
+            format!("Bookmarked #{} {}", bookmarks.len(), label)
+        }
+    };
+    save_bookmarks(&paths.root, &bookmarks)?;
+    println!("{}", message);
+    Ok(())
+}
+
+fn run_bookmark_remove(args: &BookmarkRemoveArgs, paths: &CachePaths) -> Result<()> {
+    let mut bookmarks = load_bookmarks(&paths.root)?;
+    if bookmarks.is_empty() {
+        bail!("No bookmarks to remove.");
+    }
+
+    let number = match args.target.as_slice() {
+        [single] => single.trim_start_matches('#').parse::<usize>().ok(),
+        _ => None,
+    };
+    let position = match number {
+        Some(n) if (1..=bookmarks.len()).contains(&n) => n - 1,
+        Some(n) => bail!(
+            "No bookmark #{}; there {} {}.",
+            n,
+            if bookmarks.len() == 1 { "is" } else { "are" },
+            bookmarks.len()
+        ),
+        None => {
+            // Match by the verses a reference covers, so any spelling of the
+            // passage ("jn 3:16", "John 3:16") finds it.
+            let references = parse_references(&args.target)?;
+            let verses = load_active(paths)?;
+            let index = VerseIndex::build(&verses);
+            let wanted = index.resolve_all(&references)?;
+            let same = |a: &[&Verse], b: &[&Verse]| {
+                a.len() == b.len() && a.iter().zip(b).all(|(x, y)| std::ptr::eq(*x, *y))
+            };
+            bookmarks
+                .iter()
+                .position(|b| {
+                    parse_references(std::slice::from_ref(&b.reference))
+                        .and_then(|refs| index.resolve_all(&refs))
+                        .is_ok_and(|have| same(&have, &wanted))
+                })
+                .ok_or_else(|| anyhow::anyhow!("No bookmark for {}", index.label(&wanted)))?
+        }
+    };
+
+    let removed = bookmarks.remove(position);
+    save_bookmarks(&paths.root, &bookmarks)?;
+    println!("Removed #{} {}", position + 1, removed.reference);
+    Ok(())
+}
+
+fn run_bookmark_list(tag: Option<&str>, paths: &CachePaths, output: &OutputStyle) -> Result<()> {
+    let bookmarks = load_bookmarks(&paths.root)?;
+    let tag = tag.and_then(normalize_tag);
+    // Numbers come from the full list, so `bookmark remove N` matches what a
+    // filtered view shows.
+    let shown: Vec<(usize, &Bookmark)> = bookmarks
+        .iter()
+        .enumerate()
+        .map(|(i, b)| (i + 1, b))
+        .filter(|(_, b)| tag.as_ref().is_none_or(|t| b.tags.contains(t)))
+        .collect();
+
+    if shown.is_empty() {
+        match (output.format, &tag) {
+            (Format::Json, _) => println!("[]"),
+            (Format::Plain, Some(t)) => println!("No bookmarks tagged #{}.", t),
+            (Format::Plain, None) => {
+                println!("No bookmarks yet. Try: bible bookmark add John 3:16 --note \"...\"")
+            }
+            _ => {}
+        }
+        return Ok(());
+    }
+
+    let verses = load_active(paths)?;
+    let index = VerseIndex::build(&verses);
+    // Resolved in the active translation; None if it lacks the passage.
+    let passage = |b: &Bookmark| -> Option<Vec<&Verse>> {
+        parse_references(std::slice::from_ref(&b.reference))
+            .and_then(|refs| index.resolve_all(&refs))
+            .ok()
+    };
+
+    match output.format {
+        Format::Plain => {
+            let width = terminal_width().saturating_sub(4).max(30);
+            for (n, b) in &shown {
+                let mut heading = format!(
+                    "{} {}",
+                    output.dim_span(&format!("{:>2}.", n)),
+                    output.reference_span(&b.reference)
+                );
+                if !b.tags.is_empty() {
+                    let tags: Vec<String> = b.tags.iter().map(|t| format!("#{}", t)).collect();
+                    heading.push_str("  ");
+                    heading.push_str(&output.dim_span(&tags.join(" ")));
+                }
+                println!("{}", heading);
+                let text = match passage(b) {
+                    Some(vs) => vs
+                        .iter()
+                        .map(|v| v.text.as_str())
+                        .collect::<Vec<_>>()
+                        .join(" "),
+                    None => format!("(not in {})", paths.translation.to_uppercase()),
+                };
+                println!("    {}", truncate_words(&text, width));
+                if let Some(note) = &b.note {
+                    output.print_dim(&format!("    {}", note));
+                }
+            }
+        }
+        Format::Json | Format::Ndjson => {
+            let records: Vec<serde_json::Value> = shown
+                .iter()
+                .map(|(n, b)| {
+                    let verses =
+                        passage(b).map(|vs| vs.iter().map(|v| verse_json(v)).collect::<Vec<_>>());
+                    serde_json::json!({
+                        "number": n,
+                        "reference": b.reference,
+                        "note": b.note,
+                        "tags": b.tags,
+                        "added": b.added,
+                        "verses": verses,
+                    })
+                })
+                .collect();
+            output.emit_json_records(&records);
+        }
+        Format::Tsv => {
+            for (n, b) in &shown {
+                let note = b.note.as_deref().unwrap_or("").replace(['\t', '\n'], " ");
+                println!(
+                    "{}\t{}\t{}\t{}\t{}",
+                    n,
+                    b.reference,
+                    b.tags.join(","),
+                    b.added,
+                    note
+                );
+            }
+        }
+        Format::Ref => {
+            for (_, b) in &shown {
+                println!("{}", b.reference);
+            }
+        }
+        Format::Raw => {
+            for (_, b) in &shown {
+                for v in passage(b).unwrap_or_default() {
+                    println!("{}", v.text);
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Shorten text to at most `max` characters at a word boundary, adding `…`.
+fn truncate_words(text: &str, max: usize) -> String {
+    if text.chars().count() <= max {
+        return text.to_string();
+    }
+    let cut: String = text.chars().take(max.saturating_sub(1)).collect();
+    let cut = match cut.rfind(' ') {
+        Some(space) if space > 0 => &cut[..space],
+        _ => cut.as_str(),
+    };
+    format!("{}…", cut.trim_end_matches([',', ';', ':']))
+}
+
 pub fn run_export(args: &ExportArgs, paths: &CachePaths, output: &OutputStyle) -> Result<()> {
     let references = parse_references(&args.reference)?;
     let verses = load_active(paths)?;
@@ -1652,6 +1874,17 @@ mod tests {
             "my-model"
         );
         assert!(resolve_model("gemini", None).is_err());
+    }
+
+    #[test]
+    fn truncate_words_cuts_at_word_boundaries() {
+        assert_eq!(truncate_words("short", 10), "short");
+        assert_eq!(
+            truncate_words("For God so loved the world", 12),
+            "For God so…"
+        );
+        assert_eq!(truncate_words("perish, but have", 10), "perish…");
+        assert_eq!(truncate_words("Supercalifragilistic", 6), "Super…");
     }
 
     #[test]

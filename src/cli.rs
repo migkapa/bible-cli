@@ -71,6 +71,8 @@ pub enum Commands {
     Books(BooksArgs),
     /// Practice memorizing a passage: hide words progressively, or quiz yourself.
     Memorize(MemorizeArgs),
+    /// Save passages with notes and tags (lists them when run alone).
+    Bookmark(BookmarkArgs),
     /// Manage installed translations.
     Translation(TranslationArgs),
     /// Generate a shell completion script (bash, zsh, fish, powershell, elvish).
@@ -177,6 +179,52 @@ pub struct ExportArgs {
     /// Export target format.
     #[arg(long, value_enum, default_value_t = ExportTarget::Md)]
     pub to: ExportTarget,
+}
+
+#[derive(Args)]
+pub struct BookmarkArgs {
+    #[command(subcommand)]
+    pub action: Option<BookmarkAction>,
+}
+
+#[derive(Subcommand)]
+pub enum BookmarkAction {
+    /// Bookmark a passage, optionally with a note and tags.
+    Add(BookmarkAddArgs),
+    /// List bookmarks with their text in the active translation.
+    #[command(visible_alias = "ls")]
+    List(BookmarkListArgs),
+    /// Remove a bookmark by its number (from `bookmark list`) or reference.
+    #[command(visible_alias = "rm")]
+    Remove(BookmarkRemoveArgs),
+}
+
+#[derive(Args)]
+pub struct BookmarkAddArgs {
+    #[arg(required = true)]
+    pub reference: Vec<String>,
+
+    /// A note to keep with the passage (replaces any earlier note).
+    #[arg(long)]
+    pub note: Option<String>,
+
+    /// A tag; repeat for several (`--tag love --tag gospel`).
+    #[arg(long = "tag", value_name = "TAG")]
+    pub tags: Vec<String>,
+}
+
+#[derive(Args)]
+pub struct BookmarkListArgs {
+    /// Only bookmarks with this tag.
+    #[arg(long)]
+    pub tag: Option<String>,
+}
+
+#[derive(Args)]
+pub struct BookmarkRemoveArgs {
+    /// Bookmark number (e.g. `2`) or a reference (e.g. `John 3:16`).
+    #[arg(required = true)]
+    pub target: Vec<String>,
 }
 
 #[derive(Args)]
