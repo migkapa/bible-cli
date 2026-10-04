@@ -47,7 +47,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     render_status_bar(frame, app, right_chunks[1]);
 }
 
-fn render_book_list(frame: &mut Frame, app: &App, area: Rect) {
+fn render_book_list(frame: &mut Frame, app: &mut App, area: Rect) {
     let highlight_style = if app.mode == Mode::Books {
         Style::default()
             .bg(Color::Blue)
@@ -88,7 +88,8 @@ fn render_book_list(frame: &mut Frame, app: &App, area: Rect) {
         .highlight_style(highlight_style)
         .highlight_symbol("> ");
 
-    frame.render_stateful_widget(list, area, &mut app.books.clone());
+    // The real list state, so the list keeps its scroll position between frames.
+    frame.render_stateful_widget(list, area, &mut app.books);
 }
 
 fn render_chapter_indicator(frame: &mut Frame, app: &App, area: Rect) {
@@ -109,61 +110,123 @@ fn render_chapter_indicator(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(paragraph, area);
 }
 
-fn render_verses(frame: &mut Frame, app: &App, area: Rect) {
-    let title = format!(" {} {} ", app.current_book, app.current_chapter);
-
-    let border_style = if app.mode == Mode::Reader {
-        Style::default().fg(Color::Blue)
+/// One verse as a line: a dim verse number, then the text. Highlighted verses
+/// get a yellow number and bold text.
+fn verse_line(number: u16, text: &str, highlighted: bool) -> Line<'_> {
+    let (number_style, text_style) = if highlighted {
+        (
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+            Style::default().add_modifier(Modifier::BOLD),
+        )
     } else {
-        Style::default().fg(Color::DarkGray)
+        (Style::default().fg(Color::DarkGray), Style::default())
     };
+    Line::from(vec![
+        Span::styled(format!("{:>3} ", number), number_style),
+        Span::styled(text, text_style),
+    ])
+}
+
+fn render_verses(frame: &mut Frame, app: &mut App, area: Rect) {
+    let title = format!(
+        " {} {} · {} ",
+        app.current_book,
+        app.current_chapter,
+        app.translation.to_uppercase()
+    );
+    let border_style = if app.mode == Mode::Books {
+        Style::default().fg(Color::DarkGray)
+    } else {
+        Style::default().fg(Color::Blue)
+    };
+    let inner_width = area.width.saturating_sub(2);
 
     let mut lines: Vec<Line> = Vec::new();
-
+    let mut target_line: Option<usize> = None;
     for verse in &app.chapter_verses {
-        let verse_num = format!("{:>3} ", verse.verse);
-        lines.push(Line::from(vec![
-            Span::styled(verse_num, Style::default().fg(Color::DarkGray)),
-            Span::raw(&verse.text),
-        ]));
-        // Add empty line between verses for readability
+        // Where the pending scroll target starts: the wrapped height of
+        // everything above it, measured with the renderer's own wrapping.
+        if app.pending_scroll_to == Some(verse.verse) {
+            let above = Paragraph::new(lines.clone()).wrap(Wrap { trim: false });
+            target_line = Some(if lines.is_empty() {
+                0
+            } else {
+                above.line_count(inner_width)
+            });
+        }
+        let highlighted = app.highlight.contains(&verse.verse);
+        lines.push(verse_line(verse.verse, &verse.text, highlighted));
+        // Blank line between verses for readability.
         lines.push(Line::from(""));
     }
 
-    let paragraph = Paragraph::new(lines)
+    let paragraph = Paragraph::new(lines).wrap(Wrap { trim: false });
+    app.content_lines = paragraph.line_count(inner_width).min(u16::MAX as usize) as u16;
+    if app.pending_scroll_to.take().is_some() {
+        let target = target_line.unwrap_or(0).min(u16::MAX as usize) as u16;
+        app.scroll_offset = target.min(app.max_scroll());
+    }
+    app.scroll_offset = app.scroll_offset.min(app.max_scroll());
+
+    let paragraph = paragraph
         .block(
             Block::default()
                 .borders(Borders::ALL)
                 .title(title)
                 .border_style(border_style),
         )
-        .wrap(Wrap { trim: false })
         .scroll((app.scroll_offset, 0));
 
     frame.render_widget(paragraph, area);
 }
 
 fn render_status_bar(frame: &mut Frame, app: &App, area: Rect) {
-    let mode_indicator = match app.mode {
-        Mode::Books => "[BOOKS]",
-        Mode::Reader => "[READER]",
+    let line = if app.mode == Mode::Goto {
+        Line::from(vec![
+            Span::styled(
+                "Go to: ",
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::raw(app.input.as_str()),
+            Span::styled("█", Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                "  Enter:go  Esc:cancel",
+                Style::default().fg(Color::DarkGray),
+            ),
+        ])
+    } else {
+        let mode_indicator = match app.mode {
+            Mode::Books => "[BOOKS]",
+            _ => "[READER]",
+        };
+        let hint = match (&app.status, app.mode) {
+            (Some(message), _) => {
+                Span::styled(message.as_str(), Style::default().fg(Color::Yellow))
+            }
+            (None, Mode::Books) => Span::styled(
+                "j/k:nav  g/G:first/last  Enter:select  ::go to  Tab:switch  q:quit",
+                Style::default().fg(Color::DarkGray),
+            ),
+            (None, _) => Span::styled(
+                "j/k:scroll  n/p:chapter  ::go to  g/G:top/bottom  Tab:books  q:quit",
+                Style::default().fg(Color::DarkGray),
+            ),
+        };
+        Line::from(vec![
+            Span::styled(
+                mode_indicator,
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::raw("  "),
+            hint,
+        ])
     };
-
-    let keybindings = match app.mode {
-        Mode::Books => "j/k:nav  Enter:select  Tab:switch  q:quit",
-        Mode::Reader => "j/k:scroll  n/p:chapter  Tab:books  g/G:top/bottom  q:quit",
-    };
-
-    let line = Line::from(vec![
-        Span::styled(
-            mode_indicator,
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::raw("  "),
-        Span::styled(keybindings, Style::default().fg(Color::DarkGray)),
-    ]);
 
     let paragraph = Paragraph::new(line).style(Style::default().bg(Color::Black));
 

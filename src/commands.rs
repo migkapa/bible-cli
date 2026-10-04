@@ -1438,7 +1438,12 @@ pub fn run_translation(args: &TranslationArgs, paths: &CachePaths) -> Result<()>
 pub fn run_tui(args: &TuiArgs, paths: &CachePaths) -> Result<()> {
     let verses = load_active(paths)?;
 
-    tui::run(verses, args.book.clone(), args.r#ref.clone())
+    tui::run(
+        verses,
+        args.book.clone(),
+        args.r#ref.clone(),
+        paths.translation.clone(),
+    )
 }
 
 pub fn run_plan(args: &PlanArgs, paths: &CachePaths, output: &OutputStyle) -> Result<()> {
