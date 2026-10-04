@@ -9,16 +9,17 @@ use std::io::{self, Write};
 use tokio::io::{AsyncBufReadExt, BufReader};
 
 use crate::ai::{AiProvider, ChatMessage, ProviderRequest, StreamEvent};
-use crate::books::{is_old_testament, normalize_book};
+use crate::books::{is_old_testament, normalize_book, osis_code, BOOKS, OT_BOOK_COUNT};
 use crate::cache::{
     installed_translations, known_source, known_translation, known_translations,
     load_default_translation, normalize_translation_id, preload, read_manifest, remove_translation,
     save_default_translation, CachePaths, DEFAULT_TRANSLATION,
 };
 use crate::cli::{
-    AiArgs, CacheArgs, DiffArgs, EchoArgs, ExportArgs, ExportTarget, MoodArgs, ParallelArgs,
-    PlanAction, PlanArgs, PlanDoneArgs, PlanTodayArgs, PlanUndoArgs, RandomArgs, ReadArgs,
-    SearchArgs, Testament, TodayArgs, TopicArgs, TranslationAction, TranslationArgs, TuiArgs,
+    AiArgs, BooksArgs, CacheArgs, DiffArgs, EchoArgs, ExportArgs, ExportTarget, MoodArgs,
+    ParallelArgs, PlanAction, PlanArgs, PlanDoneArgs, PlanTodayArgs, PlanUndoArgs, RandomArgs,
+    ReadArgs, SearchArgs, Testament, TodayArgs, TopicArgs, TranslationAction, TranslationArgs,
+    TuiArgs,
 };
 use crate::diff::{diff_tokens, DiffOp};
 use crate::hashing::splitmix64;
@@ -179,32 +180,20 @@ pub fn run_read(args: &ReadArgs, paths: &CachePaths, output: &OutputStyle) -> Re
 }
 
 pub fn run_search(args: &SearchArgs, paths: &CachePaths, output: &OutputStyle) -> Result<()> {
+    let query = args.query.join(" ");
+    if query.trim().is_empty() {
+        bail!("Search query is empty");
+    }
+    let matcher = build_matcher(&query, args.regex, args.word)?;
+    let book_filter = normalize_book_filter(args.book.as_deref())?;
     let verses = load_active(paths)?;
-
-    let book_filter = match args.book.as_ref() {
-        Some(book) => {
-            let normalized =
-                normalize_book(book).ok_or_else(|| anyhow::anyhow!("Unknown book: {}", book))?;
-            Some(normalized.to_string())
-        }
-        None => None,
-    };
-
-    let matcher = build_matcher(args)?;
 
     // Scan the whole corpus so counts and ordering are complete, then limit for
     // display (unless --count, which reports the full total).
-    let mut matches: Vec<&Verse> = Vec::new();
-    for verse in &verses {
-        if let Some(ref book) = book_filter {
-            if &verse.book != book {
-                continue;
-            }
-        }
-        if matcher.is_match(&verse.text) {
-            matches.push(verse);
-        }
-    }
+    let matches: Vec<&Verse> = filter_verses(&verses, book_filter.as_deref(), args.testament)
+        .into_iter()
+        .filter(|v| matcher.is_match(&v.text))
+        .collect();
 
     if args.count {
         println!("{}", matches.len());
@@ -218,48 +207,48 @@ pub fn run_search(args: &SearchArgs, paths: &CachePaths, output: &OutputStyle) -
         return Ok(());
     }
 
-    matches.truncate(args.limit);
-    output.emit_verses(&matches);
+    let shown = match args.limit {
+        0 => matches.len(),
+        limit => limit.min(matches.len()),
+    };
+    if output.is_structured() {
+        output.emit_verses(&matches[..shown]);
+        return Ok(());
+    }
+
+    for v in &matches[..shown] {
+        let spans: Vec<_> = matcher.find_iter(&v.text).map(|m| m.range()).collect();
+        println!("{}", output.highlighted_verse_line(v, &spans));
+    }
+    if shown < matches.len() && output.interactive {
+        output.print_dim(&format!(
+            "Showing {} of {} matches. Use --limit N to see more (0 for all).",
+            shown,
+            matches.len()
+        ));
+    }
     Ok(())
 }
 
-/// A compiled query matcher: substring (default), whole-word, or full regex.
-/// All matching is case-insensitive.
-enum Matcher {
-    Substring(String),
-    Regex(regex::Regex),
-}
-
-impl Matcher {
-    fn is_match(&self, text: &str) -> bool {
-        match self {
-            Matcher::Substring(needle) => text.to_lowercase().contains(needle),
-            Matcher::Regex(re) => re.is_match(text),
-        }
-    }
-}
-
-fn build_matcher(args: &SearchArgs) -> Result<Matcher> {
-    if args.regex || args.word {
-        let pattern = if args.word {
-            // Whole-word match; the query is escaped unless it is already a regex.
-            let inner = if args.regex {
-                args.query.clone()
-            } else {
-                regex::escape(&args.query)
-            };
-            format!(r"\b(?:{})\b", inner)
-        } else {
-            args.query.clone()
-        };
-        let re = RegexBuilder::new(&pattern)
-            .case_insensitive(true)
-            .build()
-            .with_context(|| format!("Invalid regex: {}", args.query))?;
-        Ok(Matcher::Regex(re))
+/// Compile a search query, always case-insensitively: a literal phrase by
+/// default, whole words only with `--word`, or a regular expression with
+/// `--regex`. A regex (rather than a lowercase substring scan) also yields
+/// exact match positions for highlighting.
+fn build_matcher(query: &str, regex: bool, word: bool) -> Result<regex::Regex> {
+    let inner = if regex {
+        query.to_string()
     } else {
-        Ok(Matcher::Substring(args.query.to_lowercase()))
-    }
+        regex::escape(query)
+    };
+    let pattern = if word {
+        format!(r"\b(?:{})\b", inner)
+    } else {
+        inner
+    };
+    RegexBuilder::new(&pattern)
+        .case_insensitive(true)
+        .build()
+        .with_context(|| format!("Invalid regex: {}", query))
 }
 
 pub fn run_today(args: &TodayArgs, paths: &CachePaths, output: &OutputStyle) -> Result<()> {
@@ -795,6 +784,102 @@ pub fn run_topic(args: &TopicArgs, paths: &CachePaths, output: &OutputStyle) -> 
         println!("Topic: {}", topic.name);
     }
     output.emit_verses(&selected);
+    Ok(())
+}
+
+pub fn run_books(args: &BooksArgs, paths: &CachePaths, output: &OutputStyle) -> Result<()> {
+    let verses = load_active(paths)?;
+    let index = VerseIndex::build(&verses);
+
+    struct BookRow {
+        name: &'static str,
+        testament: &'static str,
+        chapters: u16,
+        verses: usize,
+    }
+    // Counts come from the active translation; books it lacks are skipped.
+    let rows: Vec<BookRow> = BOOKS
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| match args.testament {
+            Some(Testament::Ot) => *i < OT_BOOK_COUNT,
+            Some(Testament::Nt) => *i >= OT_BOOK_COUNT,
+            None => true,
+        })
+        .filter_map(|(i, book)| {
+            Some(BookRow {
+                name: book.name,
+                testament: if i < OT_BOOK_COUNT { "ot" } else { "nt" },
+                chapters: index.max_chapter(book.name)?,
+                verses: index.book(book.name).len(),
+            })
+        })
+        .collect();
+
+    match output.format {
+        Format::Plain => {
+            let width = rows.iter().map(|r| r.name.len()).max().unwrap_or(0);
+            for (heading, testament) in [("Old Testament", "ot"), ("New Testament", "nt")] {
+                let group: Vec<&BookRow> =
+                    rows.iter().filter(|r| r.testament == testament).collect();
+                if group.is_empty() {
+                    continue;
+                }
+                output.print_reference_heading(heading);
+                for r in group {
+                    println!(
+                        "  {:<width$}  {:>3} chapter{}  {:>5} verses",
+                        r.name,
+                        r.chapters,
+                        if r.chapters == 1 { " " } else { "s" },
+                        r.verses
+                    );
+                }
+                println!();
+            }
+            let chapters: u32 = rows.iter().map(|r| u32::from(r.chapters)).sum();
+            let verse_count: usize = rows.iter().map(|r| r.verses).sum();
+            output.print_dim(&format!(
+                "{} books, {} chapters, {} verses ({})",
+                rows.len(),
+                chapters,
+                verse_count,
+                paths.translation.to_uppercase()
+            ));
+        }
+        Format::Json | Format::Ndjson => {
+            let records: Vec<serde_json::Value> = rows
+                .iter()
+                .map(|r| {
+                    serde_json::json!({
+                        "book": r.name,
+                        "osis": osis_code(r.name),
+                        "testament": r.testament,
+                        "chapters": r.chapters,
+                        "verses": r.verses,
+                    })
+                })
+                .collect();
+            output.emit_json_records(&records);
+        }
+        Format::Tsv => {
+            for r in &rows {
+                println!(
+                    "{}\t{}\t{}\t{}\t{}",
+                    osis_code(r.name),
+                    r.name,
+                    r.testament,
+                    r.chapters,
+                    r.verses
+                );
+            }
+        }
+        Format::Ref | Format::Raw => {
+            for r in &rows {
+                println!("{}", r.name);
+            }
+        }
+    }
     Ok(())
 }
 
@@ -1454,5 +1539,29 @@ mod tests {
             "my-model"
         );
         assert!(resolve_model("gemini", None).is_err());
+    }
+
+    #[test]
+    fn search_matcher_modes() {
+        let text = "For God so loved the world (and all in it)";
+        // Literal phrases are case-insensitive and regex-escaped.
+        assert!(build_matcher("GOD SO", false, false)
+            .unwrap()
+            .is_match(text));
+        assert!(build_matcher("(and", false, false).unwrap().is_match(text));
+        // --word needs whole words; --regex is a real pattern.
+        assert!(build_matcher("love", false, false).unwrap().is_match(text));
+        assert!(!build_matcher("love", false, true).unwrap().is_match(text));
+        assert!(build_matcher("lov(ed|eth)", true, true)
+            .unwrap()
+            .is_match(text));
+        assert!(build_matcher("(", true, false).is_err());
+        // Match spans drive highlighting.
+        let spans: Vec<_> = build_matcher("o", false, false)
+            .unwrap()
+            .find_iter("so lo")
+            .map(|m| m.range())
+            .collect();
+        assert_eq!(spans, [1..2, 4..5]);
     }
 }

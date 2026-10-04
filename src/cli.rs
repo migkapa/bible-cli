@@ -67,6 +67,8 @@ pub enum Commands {
     Export(ExportArgs),
     /// Curated topical verse collections for study.
     Topic(TopicArgs),
+    /// List the books of the Bible with chapter and verse counts.
+    Books(BooksArgs),
     /// Manage installed translations.
     Translation(TranslationArgs),
     /// Generate a shell completion script (bash, zsh, fish, powershell, elvish).
@@ -176,6 +178,13 @@ pub struct ExportArgs {
 }
 
 #[derive(Args)]
+pub struct BooksArgs {
+    /// Restrict to a testament.
+    #[arg(long, value_enum)]
+    pub testament: Option<Testament>,
+}
+
+#[derive(Args)]
 pub struct TopicArgs {
     pub topic: Option<String>,
 
@@ -245,11 +254,18 @@ pub struct ReadArgs {
 
 #[derive(Args)]
 pub struct SearchArgs {
-    pub query: String,
+    /// Word or phrase to find; quotes are optional (`bible search love one another`).
+    #[arg(required = true)]
+    pub query: Vec<String>,
 
     #[arg(long)]
     pub book: Option<String>,
 
+    /// Restrict to a testament.
+    #[arg(long, value_enum)]
+    pub testament: Option<Testament>,
+
+    /// Maximum matches to show (0 shows all).
     #[arg(long, default_value_t = 5)]
     pub limit: usize,
 

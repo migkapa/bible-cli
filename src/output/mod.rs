@@ -3,6 +3,7 @@ mod spinner;
 
 use std::env;
 use std::io::{self, IsTerminal, Write};
+use std::ops::Range;
 
 use clap::ValueEnum;
 use serde::Serialize;
@@ -77,6 +78,9 @@ pub struct OutputStyle {
     pub color: bool,
     pub theme: Theme,
     pub format: Format,
+    /// A person is reading: plain format on a terminal. Hints that would
+    /// pollute piped output (like "showing 5 of 547 matches") need this.
+    pub interactive: bool,
 }
 
 pub struct Theme {
@@ -114,6 +118,7 @@ impl OutputStyle {
             color,
             theme: Theme::claude_code(),
             format,
+            interactive: format == Format::Plain && io::stdout().is_terminal(),
         }
     }
 
@@ -200,6 +205,35 @@ impl OutputStyle {
         } else {
             format!("{}  {}", reference, verse.text)
         }
+    }
+
+    /// A verse line with byte ranges of its text emphasized (search matches).
+    pub fn highlighted_verse_line(&self, verse: &Verse, spans: &[Range<usize>]) -> String {
+        if !self.color || spans.is_empty() {
+            return self.verse_line(verse);
+        }
+        let mut text = String::with_capacity(verse.text.len() + spans.len() * 16);
+        let mut last = 0;
+        for span in spans {
+            text.push_str(&verse.text[last..span.start]);
+            text.push_str(&format!(
+                "{}{}{}{}{}",
+                SetForegroundColor(self.theme.marker),
+                SetAttribute(Attribute::Bold),
+                &verse.text[span.clone()],
+                SetAttribute(Attribute::NormalIntensity),
+                ResetColor
+            ));
+            last = span.end;
+        }
+        text.push_str(&verse.text[last..]);
+        format!(
+            "{}{}{}  {}",
+            SetForegroundColor(self.theme.reference),
+            verse_reference(verse),
+            ResetColor,
+            text
+        )
     }
 
     pub fn marked_verse_line(&self, marker: &str, verse: &Verse) -> String {

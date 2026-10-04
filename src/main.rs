@@ -79,6 +79,7 @@ async fn main() -> Result<()> {
         Commands::Plan(args) => commands::run_plan(args, &paths, &output),
         Commands::Export(args) => commands::run_export(args, &paths, &output),
         Commands::Topic(args) => commands::run_topic(args, &paths, &output),
+        Commands::Books(args) => commands::run_books(args, &paths, &output),
         Commands::Translation(args) => commands::run_translation(args, &paths),
         Commands::Completions(_) => unreachable!("handled above"),
     }
