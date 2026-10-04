@@ -1,21 +1,42 @@
+use std::collections::HashMap;
+use std::sync::OnceLock;
+
 pub struct BookDef {
     pub name: &'static str,
     pub aliases: &'static [&'static str],
 }
 
+/// Resolve a book name, alias, or OSIS code (`1 Corinthians`, `1 cor`, `1Cor`,
+/// `1co`) to its canonical name. Case, punctuation, and the space after a
+/// leading book number are all ignored.
 pub fn normalize_book(input: &str) -> Option<&'static str> {
-    let key = normalize_key(input);
-    for book in BOOKS {
-        if normalize_key(book.name) == key {
-            return Some(book.name);
-        }
-        for alias in book.aliases {
-            if normalize_key(alias) == key {
-                return Some(book.name);
+    book_lookup().get(&normalize_key(input)).copied()
+}
+
+/// Every accepted spelling of every book, keyed by `normalize_key`. Built once:
+/// the cache normalizes a book name per verse while installing a translation.
+fn book_lookup() -> &'static HashMap<String, &'static str> {
+    static LOOKUP: OnceLock<HashMap<String, &'static str>> = OnceLock::new();
+    LOOKUP.get_or_init(|| {
+        let mut map = HashMap::new();
+        for book in BOOKS {
+            for spelling in book_spellings(book) {
+                map.insert(normalize_key(spelling), book.name);
             }
         }
-    }
-    None
+        map
+    })
+}
+
+fn book_spellings(book: &BookDef) -> impl Iterator<Item = &'static str> {
+    [book.name, osis_code(book.name)]
+        .into_iter()
+        .chain(book.aliases.iter().copied())
+}
+
+/// Books with a single chapter, where `Jude 5` conventionally means verse 5.
+pub fn is_single_chapter(name: &str) -> bool {
+    matches!(name, "Obadiah" | "Philemon" | "2 John" | "3 John" | "Jude")
 }
 
 /// Number of Old Testament books at the front of `BOOKS`.
@@ -113,7 +134,18 @@ fn normalize_key(input: &str) -> String {
             out.push(ch.to_ascii_lowercase());
         }
     }
-    out.split_whitespace().collect::<Vec<_>>().join(" ")
+    let mut key = out.split_whitespace().collect::<Vec<_>>().join(" ");
+    // A leading book number may be written without a space: "1cor" == "1 cor".
+    let digits = key.bytes().take_while(|b| b.is_ascii_digit()).count();
+    if digits > 0
+        && key
+            .as_bytes()
+            .get(digits)
+            .is_some_and(u8::is_ascii_alphabetic)
+    {
+        key.insert(digits, ' ');
+    }
+    key
 }
 
 pub const BOOKS: &[BookDef] = &[
@@ -177,7 +209,6 @@ pub const BOOKS: &[BookDef] = &[
         name: "1 Kings",
         aliases: &[
             "1 kings",
-            "1 kgs",
             "1 kgs",
             "1ki",
             "i kings",
@@ -244,7 +275,7 @@ pub const BOOKS: &[BookDef] = &[
     },
     BookDef {
         name: "Ecclesiastes",
-        aliases: &["ecclesiastes", "eccl", "ecc", "qoheleth"],
+        aliases: &["ecclesiastes", "eccl", "eccles", "ecc", "qoheleth"],
     },
     BookDef {
         name: "Song of Solomon",
@@ -456,6 +487,7 @@ pub const BOOKS: &[BookDef] = &[
         name: "Revelation",
         aliases: &[
             "revelation",
+            "revelations",
             "rev",
             "re",
             "revelation of john",
@@ -463,3 +495,52 @@ pub const BOOKS: &[BookDef] = &[
         ],
     },
 ];
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn no_spelling_maps_to_two_books() {
+        let mut seen: HashMap<String, &str> = HashMap::new();
+        for book in BOOKS {
+            for spelling in book_spellings(book) {
+                let key = normalize_key(spelling);
+                if let Some(other) = seen.insert(key.clone(), book.name) {
+                    assert_eq!(other, book.name, "'{}' is ambiguous", key);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn osis_codes_round_trip() {
+        for book in BOOKS {
+            assert_eq!(normalize_book(osis_code(book.name)), Some(book.name));
+            assert_eq!(normalize_book(book.name), Some(book.name));
+        }
+    }
+
+    #[test]
+    fn compact_and_spaced_numbered_books() {
+        for (input, expected) in [
+            ("1Cor", "1 Corinthians"),
+            ("1 Co", "1 Corinthians"),
+            ("1co", "1 Corinthians"),
+            ("1Jn", "1 John"),
+            ("3 JOHN", "3 John"),
+            ("2Tim", "2 Timothy"),
+            ("1Kgs", "1 Kings"),
+            ("Esth", "Esther"),
+            ("Phlm", "Philemon"),
+            ("Ps.", "Psalms"),
+            ("Revelations", "Revelation"),
+            ("song of songs", "Song of Solomon"),
+        ] {
+            assert_eq!(normalize_book(input), Some(expected), "{}", input);
+        }
+        assert_eq!(normalize_book("Hezekiah"), None);
+        assert_eq!(normalize_book(""), None);
+        assert_eq!(normalize_book("1"), None);
+    }
+}

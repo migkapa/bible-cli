@@ -1,129 +1,262 @@
-use anyhow::{bail, Result};
+use std::fmt;
 
-use crate::books::normalize_book;
+use anyhow::{anyhow, bail, Result};
+
+use crate::books::{is_single_chapter, normalize_book};
 
 /// A parsed scripture reference. Depending on which fields are set it can denote
-/// a whole book, a whole chapter, a single verse, a verse range, or an explicit
-/// list of verses.
+/// a whole book, a chapter or run of chapters, a single verse, a verse range
+/// (possibly crossing chapters), or an explicit list of verses.
 ///
 /// - whole book:     `chapter = None`
-/// - whole chapter:  `chapter = Some(c)`, `verse = None`
+/// - whole chapter:  `chapter = Some(c)`, `verse = None`, `chapter_end = None`
+/// - chapter range:  `chapter = Some(c)`, `chapter_end = Some(d)`, no verses
+///   (`Genesis 1-3`)
 /// - single verse:   `verse = Some(v)`, `verse_end = None`, `verse_list` empty
-/// - verse range:    `verse = Some(start)`, `verse_end = Some(end)`
+/// - verse range:    `verse = Some(start)`, `verse_end = Some(end)`; with
+///   `chapter_end = Some(d)` the range ends at verse `end` of chapter `d`
+///   (`John 3:16-4:2`)
 /// - explicit list:  `verse_list` non-empty (`verse` holds the first for callers
 ///   that only understand a single anchor verse)
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ReferenceQuery {
     pub book: String,
     pub chapter: Option<u16>,
     pub verse: Option<u16>,
     pub verse_end: Option<u16>,
     pub verse_list: Vec<u16>,
+    pub chapter_end: Option<u16>,
+}
+
+impl fmt::Display for ReferenceQuery {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.book)?;
+        let Some(chapter) = self.chapter else {
+            return Ok(());
+        };
+        write!(f, " {}", chapter)?;
+        if !self.verse_list.is_empty() {
+            let list: Vec<String> = self.verse_list.iter().map(u16::to_string).collect();
+            return write!(f, ":{}", list.join(","));
+        }
+        match (self.verse, self.chapter_end, self.verse_end) {
+            (None, Some(end_chapter), _) => write!(f, "-{}", end_chapter),
+            (Some(v), Some(end_chapter), Some(end)) => {
+                write!(f, ":{}-{}:{}", v, end_chapter, end)
+            }
+            (Some(v), None, Some(end)) => write!(f, ":{}-{}", v, end),
+            (Some(v), _, None) => write!(f, ":{}", v),
+            (None, None, _) => Ok(()),
+        }
+    }
+}
+
+/// Parse one or more passages separated by `;`, e.g. `John 3:16; Romans 8:28`.
+/// A segment without a book continues the previous one: `Genesis 1:1; 2:4`.
+pub fn parse_references(tokens: &[String]) -> Result<Vec<ReferenceQuery>> {
+    let joined = tokens.join(" ");
+    let mut out: Vec<ReferenceQuery> = Vec::new();
+    for segment in joined.split(';').map(str::trim).filter(|s| !s.is_empty()) {
+        let parsed = parse_passage(segment).or_else(|err| match out.last() {
+            // Tried second, so a segment like "1 John 4:8" still names its book.
+            Some(prev) if segment.starts_with(|c: char| c.is_ascii_digit()) => {
+                parse_passage(&format!("{} {}", prev.book, segment)).map_err(|_| err)
+            }
+            _ => Err(err),
+        })?;
+        out.push(parsed);
+    }
+    if out.is_empty() {
+        bail!("Reference is required");
+    }
+    Ok(out)
+}
+
+/// Parse exactly one passage; `;`-separated lists are rejected.
+pub fn parse_reference(tokens: &[String]) -> Result<ReferenceQuery> {
+    let mut refs = parse_references(tokens)?;
+    if refs.len() > 1 {
+        bail!(
+            "Expected a single passage, not a list: {}",
+            tokens.join(" ")
+        );
+    }
+    Ok(refs.remove(0))
+}
+
+fn parse_passage(input: &str) -> Result<ReferenceQuery> {
+    let normalized = normalize_separators(input);
+    let text = normalized.trim().trim_end_matches(['.', ',']).trim_end();
+    if text.is_empty() {
+        bail!("Reference is required");
+    }
+
+    let has_colon = text.contains(':');
+    let (book_part, mut query) = match text.split_once(':') {
+        Some((left, right)) => {
+            let (book_part, chapter) = split_book_and_chapter(left.trim())?;
+            (book_part, parse_after_colon(chapter, right.trim())?)
+        }
+        None => split_trailing_numbers(text)?,
+    };
+
+    let book = normalize_book(&book_part).ok_or_else(|| anyhow!("Unknown book: {}", book_part))?;
+    query.book = book.to_string();
+    if !has_colon && is_single_chapter(book) {
+        apply_single_chapter_shorthand(&mut query);
+    }
+    Ok(query)
+}
+
+/// Canonicalize punctuation before parsing: dashes become `-`, OSIS-style dots
+/// become separators (`John.3.16` -> `John 3:16`), a chapter glued to its book
+/// gets a space (`Jn3:16`), and spaces around `-` and `,` are dropped
+/// (`3:16 - 18` -> `3:16-18`).
+fn normalize_separators(input: &str) -> String {
+    let chars: Vec<char> = input
+        .chars()
+        .map(|c| match c {
+            '\u{2010}'..='\u{2015}' | '\u{2212}' => '-',
+            c => c,
+        })
+        .collect();
+    let is_sep = |c: char| c == '-' || c == ',';
+
+    let mut out = String::with_capacity(input.len());
+    for (i, &c) in chars.iter().enumerate() {
+        let prev = i.checked_sub(1).map(|j| chars[j]);
+        let next_is_digit = chars.get(i + 1).is_some_and(|n| n.is_ascii_digit());
+        match c {
+            '.' if next_is_digit && prev.is_some_and(|p| p.is_ascii_digit()) => out.push(':'),
+            '.' if next_is_digit && prev.is_some_and(char::is_alphabetic) => out.push(' '),
+            c if c.is_whitespace() => {
+                let after_sep = out.ends_with(is_sep);
+                let before_sep = chars[i + 1..]
+                    .iter()
+                    .find(|n| !n.is_whitespace())
+                    .is_some_and(|&n| is_sep(n));
+                if !after_sep && !before_sep && !out.ends_with(' ') {
+                    out.push(' ');
+                }
+            }
+            c if c.is_ascii_digit() && prev.is_some_and(char::is_alphabetic) => {
+                out.push(' ');
+                out.push(c);
+            }
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+fn split_book_and_chapter(input: &str) -> Result<(String, u16)> {
+    let parts: Vec<&str> = input.split_whitespace().collect();
+    if parts.len() < 2 {
+        bail!("Expected <book> <chapter>:<verse>, got '{}:...'", input);
+    }
+    let last = parts[parts.len() - 1];
+    let chapter = parse_u16(last).ok_or_else(|| anyhow!("Invalid chapter: {}", last))?;
+    let book = parts[..parts.len() - 1].join(" ");
+    Ok((book, chapter))
+}
+
+/// Parse what follows `<book> <chapter>:` — a verse selector (`16`, `16-18`,
+/// `16,18,20`) or a range into a later chapter (`16-4:2`).
+fn parse_after_colon(chapter: u16, right: &str) -> Result<ReferenceQuery> {
+    let invalid = || anyhow!("Invalid verse: {}", right);
+    let mut query = ReferenceQuery {
+        chapter: Some(chapter),
+        ..ReferenceQuery::default()
+    };
+
+    if right.contains(':') {
+        let (start, end) = right.split_once('-').ok_or_else(invalid)?;
+        let (end_chapter, end_verse) = end.split_once(':').ok_or_else(invalid)?;
+        let start = parse_u16(start).ok_or_else(invalid)?;
+        let end_chapter = parse_u16(end_chapter).ok_or_else(invalid)?;
+        let end_verse = parse_u16(end_verse).ok_or_else(invalid)?;
+        if end_chapter < chapter || (end_chapter == chapter && end_verse < start) {
+            bail!("Invalid range: {}:{} ends before it starts", chapter, right);
+        }
+        query.verse = Some(start);
+        query.verse_end = Some(end_verse);
+        if end_chapter > chapter {
+            query.chapter_end = Some(end_chapter);
+        }
+        return Ok(query);
+    }
+
+    let spec = parse_verse_spec(right).ok_or_else(invalid)?;
+    query.verse = spec.verse;
+    query.verse_end = spec.verse_end;
+    query.verse_list = spec.list;
+    Ok(query)
+}
+
+/// Split a colon-free reference into its book and trailing numbers:
+/// `John 3 16`, `John 3 16-18`, `John 3`, `Genesis 1-3`, or just `John`.
+fn split_trailing_numbers(input: &str) -> Result<(String, ReferenceQuery)> {
+    let parts: Vec<&str> = input.split_whitespace().collect();
+    let n = parts.len();
+    let mut query = ReferenceQuery::default();
+    let mut book_len = n;
+
+    if n >= 3 && parse_u16(parts[n - 2]).is_some() {
+        if let Some(spec) = parse_verse_spec(parts[n - 1]) {
+            // "John 3 16", "John 3 16-18", "John 3 16,18"
+            query.chapter = parse_u16(parts[n - 2]);
+            query.verse = spec.verse;
+            query.verse_end = spec.verse_end;
+            query.verse_list = spec.list;
+            book_len = n - 2;
+        }
+    }
+    if book_len == n && n >= 2 {
+        let last = parts[n - 1];
+        if let Some(chapter) = parse_u16(last) {
+            query.chapter = Some(chapter);
+            book_len = n - 1;
+        } else if let Some((first, end)) = parse_range(last) {
+            // "Genesis 1-3"
+            if end < first {
+                bail!("Invalid chapter range: {}", last);
+            }
+            query.chapter = Some(first);
+            query.chapter_end = (end > first).then_some(end);
+            book_len = n - 1;
+        }
+    }
+
+    Ok((parts[..book_len].join(" "), query))
+}
+
+/// `Jude 5` means verse 5 of Jude's only chapter, and `Jude 3-5` verses 3-5;
+/// `Jude 1` stays the whole chapter.
+fn apply_single_chapter_shorthand(query: &mut ReferenceQuery) {
+    let Some(first) = query.chapter else {
+        return;
+    };
+    if query.verse.is_some() || !query.verse_list.is_empty() {
+        return;
+    }
+    match query.chapter_end.take() {
+        Some(last) => {
+            query.chapter = Some(1);
+            query.verse = Some(first);
+            query.verse_end = Some(last);
+        }
+        None if first != 1 => {
+            query.chapter = Some(1);
+            query.verse = Some(first);
+        }
+        None => {}
+    }
 }
 
 struct VerseSpec {
     verse: Option<u16>,
     verse_end: Option<u16>,
     list: Vec<u16>,
-}
-
-pub fn parse_reference(tokens: &[String]) -> Result<ReferenceQuery> {
-    if tokens.is_empty() {
-        bail!("Reference is required");
-    }
-
-    let joined = tokens.join(" ");
-    let (book_part, chapter, spec) = if joined.contains(':') {
-        let parts: Vec<&str> = joined.split(':').collect();
-        if parts.len() != 2 {
-            bail!("Invalid reference: {}", joined);
-        }
-        let left = parts[0].trim();
-        let right = parts[1].trim();
-        let spec =
-            parse_verse_spec(right).ok_or_else(|| anyhow::anyhow!("Invalid verse: {}", right))?;
-        let (book_part, chapter) = split_book_and_chapter(left)?;
-        (book_part, Some(chapter), Some(spec))
-    } else {
-        split_trailing_numbers(&joined)?
-    };
-
-    let book =
-        normalize_book(&book_part).ok_or_else(|| anyhow::anyhow!("Unknown book: {}", book_part))?;
-
-    let (verse, verse_end, verse_list) = match spec {
-        Some(spec) => (spec.verse, spec.verse_end, spec.list),
-        None => (None, None, Vec::new()),
-    };
-
-    Ok(ReferenceQuery {
-        book: book.to_string(),
-        chapter,
-        verse,
-        verse_end,
-        verse_list,
-    })
-}
-
-fn split_book_and_chapter(input: &str) -> Result<(String, u16)> {
-    let parts: Vec<&str> = input.split_whitespace().collect();
-    if parts.len() < 2 {
-        bail!("Chapter is required: {}", input);
-    }
-    let last = parts[parts.len() - 1];
-    let chapter = parse_u16(last).ok_or_else(|| anyhow::anyhow!("Invalid chapter: {}", last))?;
-    let book = parts[..parts.len() - 1].join(" ");
-    Ok((book, chapter))
-}
-
-fn split_trailing_numbers(input: &str) -> Result<(String, Option<u16>, Option<VerseSpec>)> {
-    let parts: Vec<&str> = input.split_whitespace().collect();
-    if parts.is_empty() {
-        bail!("Reference is required");
-    }
-    let mut book_parts = parts.clone();
-    let mut chapter = None;
-    let mut spec = None;
-
-    if let Some(last) = parts.last() {
-        let last_spec = parse_verse_spec(last);
-        if let Some(last_num) = parse_u16(last) {
-            // The final token is a bare number: it is the chapter, unless the
-            // token before it is also a number (then chapter + verse).
-            if parts.len() >= 2 {
-                if let Some(prev_num) = parse_u16(parts[parts.len() - 2]) {
-                    spec = Some(VerseSpec {
-                        verse: Some(last_num),
-                        verse_end: None,
-                        list: Vec::new(),
-                    });
-                    chapter = Some(prev_num);
-                    book_parts = parts[..parts.len() - 2].to_vec();
-                } else {
-                    chapter = Some(last_num);
-                    book_parts = parts[..parts.len() - 1].to_vec();
-                }
-            } else {
-                chapter = Some(last_num);
-                book_parts = parts[..parts.len() - 1].to_vec();
-            }
-        } else if last_spec.is_some() && parts.len() >= 2 {
-            // The final token is a verse spec like "16-18" or "16,18"; the token
-            // before it must be the chapter (e.g. "John 3 16-18").
-            if let Some(prev_num) = parse_u16(parts[parts.len() - 2]) {
-                spec = last_spec;
-                chapter = Some(prev_num);
-                book_parts = parts[..parts.len() - 2].to_vec();
-            }
-        }
-    }
-
-    let book = if book_parts.is_empty() {
-        input.to_string()
-    } else {
-        book_parts.join(" ")
-    };
-
-    Ok((book, chapter, spec))
 }
 
 /// Parse the portion after the chapter into a verse selector: a single verse
@@ -185,21 +318,28 @@ fn parse_range(input: &str) -> Option<(u16, u16)> {
 }
 
 fn parse_u16(input: &str) -> Option<u16> {
-    input.parse::<u16>().ok()
+    input.trim().parse::<u16>().ok()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn q(tokens: &[&str]) -> ReferenceQuery {
-        let owned: Vec<String> = tokens.iter().map(|s| s.to_string()).collect();
-        parse_reference(&owned).unwrap()
+    fn q(input: &str) -> ReferenceQuery {
+        parse_reference(&[input.to_string()]).unwrap_or_else(|e| panic!("{}: {}", input, e))
+    }
+
+    fn qs(input: &str) -> Vec<ReferenceQuery> {
+        parse_references(&[input.to_string()]).unwrap_or_else(|e| panic!("{}: {}", input, e))
+    }
+
+    fn err(input: &str) -> bool {
+        parse_references(&[input.to_string()]).is_err()
     }
 
     #[test]
     fn single_verse_colon() {
-        let r = q(&["John", "3:16"]);
+        let r = q("John 3:16");
         assert_eq!(r.book, "John");
         assert_eq!(r.chapter, Some(3));
         assert_eq!(r.verse, Some(16));
@@ -209,68 +349,177 @@ mod tests {
 
     #[test]
     fn single_verse_spaced() {
-        let r = q(&["John", "3", "16"]);
+        let owned: Vec<String> = ["John", "3", "16"].iter().map(|s| s.to_string()).collect();
+        let r = parse_reference(&owned).unwrap();
         assert_eq!(r.chapter, Some(3));
         assert_eq!(r.verse, Some(16));
     }
 
     #[test]
     fn whole_chapter() {
-        let r = q(&["Psalm", "23"]);
+        let r = q("Psalm 23");
         assert_eq!(r.book, "Psalms");
         assert_eq!(r.chapter, Some(23));
         assert_eq!(r.verse, None);
+        assert_eq!(r.chapter_end, None);
     }
 
     #[test]
     fn whole_book() {
-        let r = q(&["Jude"]);
-        assert_eq!(r.book, "Jude");
+        let r = q("Romans");
+        assert_eq!(r.book, "Romans");
         assert_eq!(r.chapter, None);
+        assert_eq!(q("1 John").chapter, None);
     }
 
     #[test]
-    fn range_colon() {
-        let r = q(&["John", "3:16-18"]);
-        assert_eq!(r.chapter, Some(3));
-        assert_eq!(r.verse, Some(16));
-        assert_eq!(r.verse_end, Some(18));
+    fn range_colon_and_spaced() {
+        for input in [
+            "John 3:16-18",
+            "John 3 16-18",
+            "John 3:16 - 18",
+            "John 3:16–18",
+        ] {
+            let r = q(input);
+            assert_eq!(
+                (r.chapter, r.verse, r.verse_end),
+                (Some(3), Some(16), Some(18))
+            );
+        }
     }
 
     #[test]
-    fn range_spaced() {
-        let r = q(&["John", "3", "16-18"]);
-        assert_eq!(r.chapter, Some(3));
-        assert_eq!(r.verse, Some(16));
-        assert_eq!(r.verse_end, Some(18));
-    }
-
-    #[test]
-    fn list_colon() {
-        let r = q(&["John", "3:16,18,20"]);
-        assert_eq!(r.chapter, Some(3));
-        assert_eq!(r.verse_list, vec![16, 18, 20]);
-        assert_eq!(r.verse, Some(16));
-    }
-
-    #[test]
-    fn list_with_range() {
-        let r = q(&["John", "3:16-18,20"]);
-        assert_eq!(r.verse_list, vec![16, 17, 18, 20]);
+    fn lists() {
+        assert_eq!(q("John 3:16,18,20").verse_list, vec![16, 18, 20]);
+        assert_eq!(q("John 3:16, 18").verse_list, vec![16, 18]);
+        assert_eq!(q("John 3:16-18,20").verse_list, vec![16, 17, 18, 20]);
+        assert_eq!(q("John 3:16,18").verse, Some(16));
     }
 
     #[test]
     fn multiword_book_range() {
-        let r = q(&["1", "John", "4:7-9"]);
+        let r = q("1 John 4:7-9");
         assert_eq!(r.book, "1 John");
-        assert_eq!(r.chapter, Some(4));
-        assert_eq!(r.verse, Some(7));
-        assert_eq!(r.verse_end, Some(9));
+        assert_eq!(
+            (r.chapter, r.verse, r.verse_end),
+            (Some(4), Some(7), Some(9))
+        );
+    }
+
+    #[test]
+    fn chapter_ranges() {
+        let r = q("Genesis 1-3");
+        assert_eq!(
+            (r.chapter, r.chapter_end, r.verse),
+            (Some(1), Some(3), None)
+        );
+        let r = q("Matthew 5–7");
+        assert_eq!((r.chapter, r.chapter_end), (Some(5), Some(7)));
+        // A one-chapter "range" is just that chapter.
+        let r = q("Psalm 23-23");
+        assert_eq!((r.chapter, r.chapter_end), (Some(23), None));
+        assert!(err("Genesis 3-1"));
+    }
+
+    #[test]
+    fn cross_chapter_ranges() {
+        let r = q("John 3:36-4:2");
+        assert_eq!(
+            (r.chapter, r.verse, r.chapter_end, r.verse_end),
+            (Some(3), Some(36), Some(4), Some(2))
+        );
+        // Ending in the same chapter collapses to a plain range.
+        let r = q("John 3:16-3:18");
+        assert_eq!(
+            (r.verse, r.verse_end, r.chapter_end),
+            (Some(16), Some(18), None)
+        );
+        assert!(err("John 4:2-3:16"));
+        assert!(err("John 3:18-3:16"));
+    }
+
+    #[test]
+    fn osis_and_compact_forms() {
+        for input in ["John.3.16", "Jn3:16", "John 3.16", "jn 3 16"] {
+            let r = q(input);
+            assert_eq!(
+                (r.book.as_str(), r.chapter, r.verse),
+                ("John", Some(3), Some(16))
+            );
+        }
+        let r = q("1Cor.13.4-7");
+        assert_eq!(r.book, "1 Corinthians");
+        assert_eq!(
+            (r.chapter, r.verse, r.verse_end),
+            (Some(13), Some(4), Some(7))
+        );
+        assert_eq!(q("Ps.23").chapter, Some(23));
+        assert_eq!(q("1Jn 4:8").book, "1 John");
+        assert_eq!(q("John 3:16.").verse, Some(16));
+    }
+
+    #[test]
+    fn single_chapter_books_take_verse_numbers() {
+        let r = q("Jude 5");
+        assert_eq!((r.chapter, r.verse), (Some(1), Some(5)));
+        let r = q("Jude 3-5");
+        assert_eq!(
+            (r.chapter, r.verse, r.verse_end),
+            (Some(1), Some(3), Some(5))
+        );
+        let r = q("Philemon 6");
+        assert_eq!((r.chapter, r.verse), (Some(1), Some(6)));
+        // "Jude 1" is the whole chapter; explicit forms are left alone.
+        let r = q("Jude 1");
+        assert_eq!((r.chapter, r.verse), (Some(1), None));
+        let r = q("3 John 1:4");
+        assert_eq!((r.chapter, r.verse), (Some(1), Some(4)));
+        // Multi-chapter books are unaffected.
+        assert_eq!(q("John 5").verse, None);
+    }
+
+    #[test]
+    fn passage_lists() {
+        let refs = qs("John 3:16; Romans 8:28");
+        assert_eq!(refs.len(), 2);
+        assert_eq!(refs[1].book, "Romans");
+
+        // A bare chapter[:verse] continues the previous book.
+        let refs = qs("Genesis 1:1; 2:4; Psalm 23; 24");
+        let got: Vec<String> = refs.iter().map(|r| r.to_string()).collect();
+        assert_eq!(
+            got,
+            ["Genesis 1:1", "Genesis 2:4", "Psalms 23", "Psalms 24"]
+        );
+
+        // ...but a numbered book still wins.
+        assert_eq!(qs("John 3:16; 1 John 4:8")[1].book, "1 John");
+        assert!(parse_reference(&["John 3:16; Romans 8:28".to_string()]).is_err());
+        assert!(err("3:16"));
+        assert!(err("John 3:16; Hezekiah 1:1"));
     }
 
     #[test]
     fn reversed_range_is_error() {
-        let owned = vec!["John".to_string(), "3:18-16".to_string()];
-        assert!(parse_reference(&owned).is_err());
+        assert!(err("John 3:18-16"));
+    }
+
+    #[test]
+    fn display_round_trips() {
+        for input in [
+            "John 3:16",
+            "John 3:16-18",
+            "John 3:16,18,20",
+            "John 3:36-4:2",
+            "Genesis 1-3",
+            "Psalms 23",
+            "Jude",
+            "Jude 1:5",
+            "1 Corinthians 13:4-7",
+        ] {
+            let parsed = q(input);
+            assert_eq!(parsed.to_string(), input);
+            assert_eq!(q(&parsed.to_string()), parsed);
+        }
     }
 }

@@ -26,10 +26,10 @@ use crate::plans::{
     all_plans, build_days, clear_state, find_plan, load_state, portion_label, save_state, PlanDef,
     PlanState,
 };
-use crate::reference::{parse_reference, ReferenceQuery};
+use crate::reference::{parse_reference, parse_references};
 use crate::topics::{all_topics, find_topic};
 use crate::tui;
-use crate::verses::{load_verses, max_chapter, Verse, VerseIndex};
+use crate::verses::{load_verses, Verse, VerseIndex};
 
 pub fn run_cache(args: &CacheArgs, paths: &CachePaths) -> Result<()> {
     let id = &paths.translation;
@@ -148,41 +148,34 @@ fn load_translations(paths: &CachePaths, ids: &[String]) -> Result<Vec<Vec<Verse
     Ok(loaded)
 }
 
+/// Load the active translation's verses, with an install hint if it is missing.
+fn load_active(paths: &CachePaths) -> Result<Vec<Verse>> {
+    load_verses(&paths.verses_path()).with_context(|| missing_cache_msg(&paths.translation))
+}
+
 pub fn run_read(args: &ReadArgs, paths: &CachePaths, output: &OutputStyle) -> Result<()> {
-    let reference = parse_reference(&args.reference)?;
-    let verses =
-        load_verses(&paths.verses_path()).with_context(|| missing_cache_msg(&paths.translation))?;
+    let references = parse_references(&args.reference)?;
+    let verses = load_active(paths)?;
     let index = VerseIndex::build(&verses);
 
-    // Whole-book reference: a chapter overview in the human view, or the full
-    // book as data in structured formats.
-    if reference.chapter.is_none() {
-        if output.is_structured() {
-            let book_verses = book_verses(&verses, &reference.book);
-            if book_verses.is_empty() {
-                bail!("Book not found: {}", reference.book);
+    // A lone multi-chapter book reads as an overview in the human view; data
+    // formats (and one-chapter books like Jude) get the verses themselves.
+    if let [reference] = references.as_slice() {
+        if reference.chapter.is_none() && !output.is_structured() {
+            if let Some(chapters) = index.max_chapter(&reference.book).filter(|&c| c > 1) {
+                print_book_overview(&index, &reference.book, chapters);
+                return Ok(());
             }
-            output.emit_verses(&book_verses);
-            return Ok(());
         }
-        return print_book_overview(&verses, &reference);
     }
 
-    let selected = index.resolve(&reference)?;
+    let selected = index.resolve_all(&references)?;
     output.emit_verses(&selected);
     Ok(())
 }
 
-/// All verses of a book in canonical order.
-fn book_verses<'a>(verses: &'a [Verse], book: &str) -> Vec<&'a Verse> {
-    let mut out: Vec<&Verse> = verses.iter().filter(|v| v.book == book).collect();
-    out.sort_by_key(|v| (v.chapter, v.verse));
-    out
-}
-
 pub fn run_search(args: &SearchArgs, paths: &CachePaths, output: &OutputStyle) -> Result<()> {
-    let verses =
-        load_verses(&paths.verses_path()).with_context(|| missing_cache_msg(&paths.translation))?;
+    let verses = load_active(paths)?;
 
     let book_filter = match args.book.as_ref() {
         Some(book) => {
@@ -266,8 +259,7 @@ fn build_matcher(args: &SearchArgs) -> Result<Matcher> {
 }
 
 pub fn run_today(args: &TodayArgs, paths: &CachePaths, output: &OutputStyle) -> Result<()> {
-    let verses =
-        load_verses(&paths.verses_path()).with_context(|| missing_cache_msg(&paths.translation))?;
+    let verses = load_active(paths)?;
 
     let book_filter = normalize_book_filter(args.book.as_deref())?;
     let pool = filter_verses(&verses, book_filter.as_deref(), args.testament);
@@ -287,8 +279,7 @@ pub fn run_today(args: &TodayArgs, paths: &CachePaths, output: &OutputStyle) -> 
 }
 
 pub fn run_random(args: &RandomArgs, paths: &CachePaths, output: &OutputStyle) -> Result<()> {
-    let verses =
-        load_verses(&paths.verses_path()).with_context(|| missing_cache_msg(&paths.translation))?;
+    let verses = load_active(paths)?;
 
     let book_filter = normalize_book_filter(args.book.as_deref())?;
     let mut pool = filter_verses(&verses, book_filter.as_deref(), args.testament);
@@ -347,42 +338,27 @@ fn filter_verses<'a>(
 
 pub fn run_echo(args: &EchoArgs, paths: &CachePaths, output: &OutputStyle) -> Result<()> {
     let reference = parse_reference(&args.reference)?;
-    let chapter = reference
-        .chapter
-        .ok_or_else(|| anyhow::anyhow!("Chapter is required"))?;
-    let verse_number = reference
-        .verse
-        .ok_or_else(|| anyhow::anyhow!("Verse is required"))?;
-
-    let verses =
-        load_verses(&paths.verses_path()).with_context(|| missing_cache_msg(&paths.translation))?;
-
-    let mut chapter_verses: Vec<&Verse> = verses
-        .iter()
-        .filter(|v| v.book == reference.book && v.chapter == chapter)
-        .collect();
-    if chapter_verses.is_empty() {
-        bail!("No verses found for {} {}", reference.book, chapter);
+    if reference.verse.is_none() {
+        bail!("Echo needs a verse, e.g. `bible echo John 3:16` or `bible echo John 3:16-18`");
     }
-    chapter_verses.sort_by_key(|v| v.verse);
 
-    let position = chapter_verses
-        .iter()
-        .position(|v| v.verse == verse_number)
-        .ok_or_else(|| anyhow::anyhow!("Verse not found"))?;
-
-    let window = args.window as usize;
-    let start = position.saturating_sub(window);
-    let end = (position + window).min(chapter_verses.len() - 1);
+    let verses = load_active(paths)?;
+    let index = VerseIndex::build(&verses);
+    let selected = index.resolve(&reference)?;
+    let context = index.with_context(&selected, args.window as usize);
 
     if output.is_structured() {
-        let slice: Vec<&Verse> = chapter_verses[start..=end].to_vec();
-        output.emit_verses(&slice);
+        output.emit_verses(&context);
         return Ok(());
     }
 
-    for (idx, verse) in chapter_verses.iter().enumerate().take(end + 1).skip(start) {
-        let marker = if idx == position { "*" } else { " " };
+    // Every verse the reference names is marked, so ranges and lists echo too.
+    for verse in &context {
+        let marker = if selected.iter().any(|s| std::ptr::eq(*s, *verse)) {
+            "*"
+        } else {
+            " "
+        };
         println!("{}", output.marked_verse_line(marker, verse));
     }
 
@@ -402,8 +378,7 @@ pub fn run_mood(args: &MoodArgs, paths: &CachePaths, output: &OutputStyle) -> Re
     let mood =
         find_mood(mood_name).ok_or_else(|| anyhow::anyhow!("Unknown mood: {}", mood_name))?;
 
-    let verses =
-        load_verses(&paths.verses_path()).with_context(|| missing_cache_msg(&paths.translation))?;
+    let verses = load_active(paths)?;
     let index = VerseIndex::build(&verses);
 
     let selected: Vec<&Verse> = mood
@@ -420,12 +395,35 @@ pub fn run_mood(args: &MoodArgs, paths: &CachePaths, output: &OutputStyle) -> Re
     Ok(())
 }
 
-pub async fn run_ai(args: &AiArgs, paths: &CachePaths, output: &OutputStyle) -> Result<()> {
-    let reference = parse_reference(&args.reference)?;
-    let verses =
-        load_verses(&paths.verses_path()).with_context(|| missing_cache_msg(&paths.translation))?;
+/// Upper bound on verses sent to an AI provider, so `bible ai Psalms` cannot
+/// silently ship a whole book (2,461 verses) in one request.
+const MAX_AI_VERSES: usize = 300;
 
-    let selected = select_ai_verses(&verses, &reference, args.window)?;
+pub async fn run_ai(args: &AiArgs, paths: &CachePaths, output: &OutputStyle) -> Result<()> {
+    let references = parse_references(&args.reference)?;
+    if references.iter().any(|r| r.chapter.is_none()) {
+        bail!("AI prompts need a chapter, e.g. `bible ai John 3` or `bible ai John 3:16`");
+    }
+    let verses = load_active(paths)?;
+    let index = VerseIndex::build(&verses);
+
+    let mut selected: Vec<&Verse> = Vec::new();
+    for reference in &references {
+        let passage = index.resolve(reference)?;
+        if args.window > 0 {
+            selected.extend(index.with_context(&passage, args.window as usize));
+        } else {
+            selected.extend(passage);
+        }
+    }
+    if selected.len() > MAX_AI_VERSES {
+        bail!(
+            "{} is {} verses; AI prompts are limited to {}. Try a shorter passage.",
+            index.label(&selected),
+            selected.len(),
+            MAX_AI_VERSES
+        );
+    }
 
     if args.chat {
         return run_ai_chat_streaming(args, &selected, output).await;
@@ -666,13 +664,14 @@ async fn run_ai_chat_streaming(
     Ok(())
 }
 
-fn print_book_overview(verses: &[Verse], reference: &ReferenceQuery) -> Result<()> {
-    let Some(max_chapter) = max_chapter(verses, &reference.book) else {
-        bail!("Book not found: {}", reference.book);
-    };
-    println!("{} has {} chapters.", reference.book, max_chapter);
-    println!("Tip: bible read {} <chapter>", reference.book);
-    Ok(())
+fn print_book_overview(index: &VerseIndex, book: &str, chapters: u16) {
+    println!(
+        "{} has {} chapters and {} verses.",
+        book,
+        chapters,
+        index.book(book).len()
+    );
+    println!("Tip: bible read {} <chapter>", book);
 }
 
 fn daily_prompt(seed: usize) -> &'static str {
@@ -684,40 +683,6 @@ fn daily_prompt(seed: usize) -> &'static str {
         "Read it twice, slowly. What changes?",
     ];
     PROMPTS[seed % PROMPTS.len()]
-}
-
-fn select_ai_verses<'a>(
-    verses: &'a [Verse],
-    reference: &ReferenceQuery,
-    window: u16,
-) -> Result<Vec<&'a Verse>> {
-    let chapter = reference
-        .chapter
-        .ok_or_else(|| anyhow::anyhow!("Chapter is required for AI prompts"))?;
-
-    let mut chapter_verses: Vec<&Verse> = verses
-        .iter()
-        .filter(|v| v.book == reference.book && v.chapter == chapter)
-        .collect();
-    if chapter_verses.is_empty() {
-        bail!("No verses found for {} {}", reference.book, chapter);
-    }
-    chapter_verses.sort_by_key(|v| v.verse);
-
-    let Some(verse_number) = reference.verse else {
-        return Ok(chapter_verses);
-    };
-
-    let position = chapter_verses
-        .iter()
-        .position(|v| v.verse == verse_number)
-        .ok_or_else(|| anyhow::anyhow!("Verse not found"))?;
-
-    let window = window as usize;
-    let start = position.saturating_sub(window);
-    let end = (position + window).min(chapter_verses.len() - 1);
-
-    Ok(chapter_verses[start..=end].to_vec())
 }
 
 fn build_ai_prompt(selected: &[&Verse]) -> String {
@@ -776,45 +741,6 @@ fn contains_markdown(text: &str) -> bool {
         || text.contains("> ")
 }
 
-/// Resolve a reference to verses, handling whole-book references (which `read`
-/// renders as an overview but `export`/`parallel` treat as the full book).
-fn resolve_selection<'a>(
-    index: &VerseIndex<'a>,
-    verses: &'a [Verse],
-    reference: &ReferenceQuery,
-) -> Result<Vec<&'a Verse>> {
-    if reference.chapter.is_none() {
-        let bv = book_verses(verses, &reference.book);
-        if bv.is_empty() {
-            bail!("Book not found: {}", reference.book);
-        }
-        Ok(bv)
-    } else {
-        index.resolve(reference)
-    }
-}
-
-/// A human label for a contiguous selection, e.g. `John 3:16` or `John 3:16-18`.
-fn passage_label(selected: &[&Verse]) -> String {
-    match (selected.first(), selected.last()) {
-        (Some(first), Some(last)) if selected.len() > 1 => {
-            if first.chapter == last.chapter {
-                format!(
-                    "{} {}:{}-{}",
-                    first.book, first.chapter, first.verse, last.verse
-                )
-            } else {
-                format!(
-                    "{} {}:{}-{}:{}",
-                    first.book, first.chapter, first.verse, last.chapter, last.verse
-                )
-            }
-        }
-        (Some(first), _) => format!("{} {}:{}", first.book, first.chapter, first.verse),
-        _ => String::new(),
-    }
-}
-
 pub fn run_topic(args: &TopicArgs, paths: &CachePaths, output: &OutputStyle) -> Result<()> {
     if args.list || args.topic.is_none() {
         println!("Available topics:");
@@ -834,8 +760,7 @@ pub fn run_topic(args: &TopicArgs, paths: &CachePaths, output: &OutputStyle) -> 
         return Ok(());
     }
 
-    let verses =
-        load_verses(&paths.verses_path()).with_context(|| missing_cache_msg(&paths.translation))?;
+    let verses = load_active(paths)?;
     let index = VerseIndex::build(&verses);
     let selected: Vec<&Verse> = topic
         .refs
@@ -851,18 +776,17 @@ pub fn run_topic(args: &TopicArgs, paths: &CachePaths, output: &OutputStyle) -> 
 }
 
 pub fn run_export(args: &ExportArgs, paths: &CachePaths, output: &OutputStyle) -> Result<()> {
-    let reference = parse_reference(&args.reference)?;
-    let verses =
-        load_verses(&paths.verses_path()).with_context(|| missing_cache_msg(&paths.translation))?;
+    let references = parse_references(&args.reference)?;
+    let verses = load_active(paths)?;
     let index = VerseIndex::build(&verses);
-    let selected = resolve_selection(&index, &verses, &reference)?;
+    let selected = index.resolve_all(&references)?;
     let _ = output; // export format is controlled by --to, not the global format
 
     match args.to {
         ExportTarget::Md => {
             println!(
                 "## {} ({})",
-                passage_label(&selected),
+                index.label(&selected),
                 paths.translation.to_uppercase()
             );
             println!();
@@ -891,7 +815,7 @@ pub fn run_export(args: &ExportArgs, paths: &CachePaths, output: &OutputStyle) -
 }
 
 pub fn run_parallel(args: &ParallelArgs, paths: &CachePaths, output: &OutputStyle) -> Result<()> {
-    let reference = parse_reference(&args.reference)?;
+    let references = parse_references(&args.reference)?;
 
     let ids = parse_translation_list(&args.with)?;
     if ids.is_empty() {
@@ -903,7 +827,7 @@ pub fn run_parallel(args: &ParallelArgs, paths: &CachePaths, output: &OutputStyl
     let indexes: Vec<VerseIndex> = loaded.iter().map(|v| VerseIndex::build(v)).collect();
 
     // The first translation defines the versification we iterate over.
-    let base = resolve_selection(&indexes[0], &loaded[0], &reference)?;
+    let base = indexes[0].resolve_all(&references)?;
 
     if output.is_structured() {
         let mut arr = Vec::new();
@@ -1049,8 +973,7 @@ pub fn run_translation(args: &TranslationArgs, paths: &CachePaths) -> Result<()>
 }
 
 pub fn run_tui(args: &TuiArgs, paths: &CachePaths) -> Result<()> {
-    let verses =
-        load_verses(&paths.verses_path()).with_context(|| missing_cache_msg(&paths.translation))?;
+    let verses = load_active(paths)?;
 
     tui::run(verses, args.book.clone(), args.r#ref.clone())
 }
@@ -1146,8 +1069,7 @@ fn run_plan_today(args: &PlanTodayArgs, paths: &CachePaths, output: &OutputStyle
         },
     };
 
-    let verses =
-        load_verses(&paths.verses_path()).with_context(|| missing_cache_msg(&paths.translation))?;
+    let verses = load_active(paths)?;
     let days = build_days(plan, &verses)?;
     let portion = &days[(day - 1) as usize];
 
@@ -1320,7 +1242,7 @@ fn diff_tokens<'a>(base: &[&'a str], other: &[&'a str]) -> Vec<DiffOp<'a>> {
 }
 
 pub fn run_diff(args: &DiffArgs, paths: &CachePaths, output: &OutputStyle) -> Result<()> {
-    let reference = parse_reference(&args.reference)?;
+    let references = parse_references(&args.reference)?;
 
     let mut ids = parse_translation_list(&args.with)?;
     // A single id is diffed against the active translation.
@@ -1335,7 +1257,7 @@ pub fn run_diff(args: &DiffArgs, paths: &CachePaths, output: &OutputStyle) -> Re
     let indexes: Vec<VerseIndex> = loaded.iter().map(|v| VerseIndex::build(v)).collect();
 
     // The first translation is the base; it defines versification and word order.
-    let base = resolve_selection(&indexes[0], &loaded[0], &reference)?;
+    let base = indexes[0].resolve_all(&references)?;
     let others = &ids[1..];
 
     if output.is_structured() {
