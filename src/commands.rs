@@ -9,7 +9,7 @@ use std::io::{self, Write};
 use tokio::io::{AsyncBufReadExt, BufReader};
 
 use crate::ai::{AiProvider, ChatMessage, ProviderRequest, StreamEvent};
-use crate::books::{is_old_testament, normalize_book, osis_code};
+use crate::books::{is_old_testament, normalize_book};
 use crate::cache::{
     installed_translations, known_source, known_translation, known_translations,
     load_default_translation, normalize_translation_id, preload, read_manifest, remove_translation,
@@ -17,11 +17,15 @@ use crate::cache::{
 };
 use crate::cli::{
     AiArgs, CacheArgs, DiffArgs, EchoArgs, ExportArgs, ExportTarget, MoodArgs, ParallelArgs,
-    PlanAction, PlanArgs, PlanDoneArgs, PlanTodayArgs, RandomArgs, ReadArgs, SearchArgs, Testament,
-    TodayArgs, TopicArgs, TranslationAction, TranslationArgs, TuiArgs,
+    PlanAction, PlanArgs, PlanDoneArgs, PlanTodayArgs, PlanUndoArgs, RandomArgs, ReadArgs,
+    SearchArgs, Testament, TodayArgs, TopicArgs, TranslationAction, TranslationArgs, TuiArgs,
 };
+use crate::diff::{diff_tokens, DiffOp};
+use crate::hashing::splitmix64;
 use crate::moods::{all_moods, find_mood};
-use crate::output::{MarkdownRenderer, OutputStyle, ThinkingIndicator};
+use crate::output::{
+    verse_id, verse_reference, Format, MarkdownRenderer, OutputStyle, ThinkingIndicator,
+};
 use crate::plans::{
     all_plans, build_days, clear_state, find_plan, load_state, portion_label, save_state, PlanDef,
     PlanState,
@@ -269,7 +273,9 @@ pub fn run_today(args: &TodayArgs, paths: &CachePaths, output: &OutputStyle) -> 
 
     let date = Local::now().date_naive();
     let day_seed = date.num_days_from_ce() as usize;
-    let verse = pool[day_seed % pool.len()];
+    // Hash the day number: a plain modulo walked through the corpus one verse
+    // per day, so tomorrow's verse was always the one after today's.
+    let verse = pool[(splitmix64(day_seed as u64) % pool.len() as u64) as usize];
 
     output.emit_verses(&[verse]);
     if !output.is_structured() {
@@ -433,6 +439,21 @@ pub async fn run_ai(args: &AiArgs, paths: &CachePaths, output: &OutputStyle) -> 
     run_ai_single_streaming(args, &selected, output).await
 }
 
+/// The model to use: an explicit `--model`, else the provider's default.
+fn resolve_model(provider: &str, model: Option<&str>) -> Result<String> {
+    match model {
+        Some(model) => Ok(model.to_string()),
+        None => AiProvider::default_model(provider)
+            .map(str::to_string)
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Unknown provider: {} (supported: openai, anthropic)",
+                    provider
+                )
+            }),
+    }
+}
+
 async fn run_ai_single_streaming(
     args: &AiArgs,
     selected: &[&Verse],
@@ -447,7 +468,7 @@ async fn run_ai_single_streaming(
     let provider = AiProvider::from_name(&args.provider)?;
     let prompt = build_ai_prompt(selected);
     let request = ProviderRequest {
-        model: args.model.clone(),
+        model: resolve_model(&args.provider, args.model.as_deref())?,
         system: Some("You are a thoughtful Bible assistant.".to_string()),
         messages: vec![chat_message("user", prompt)],
         max_tokens: Some(args.max_tokens),
@@ -503,8 +524,8 @@ async fn run_ai_chat_streaming(
     const MAX_HISTORY_MESSAGES: usize = 16;
     const SYSTEM_PROMPT: &str = "You are a thoughtful Bible assistant. Use the passage context in the conversation. Format your responses with markdown when helpful.";
 
-    let mut current_model = args.model.clone();
-    let mut current_provider = args.provider.clone();
+    let mut current_model = resolve_model(&args.provider, args.model.as_deref())?;
+    let mut current_provider = args.provider.to_lowercase();
 
     // Print verses
     output.print_separator();
@@ -570,12 +591,14 @@ async fn run_ai_chat_streaming(
             if provider_name.is_empty() {
                 output.print_dim(&format!("Current provider: {}", current_provider));
                 output.print_dim("Usage: /provider <openai|anthropic>");
-            } else if matches!(
-                provider_name.to_lowercase().as_str(),
-                "openai" | "anthropic"
-            ) {
+            } else if let Some(model) = AiProvider::default_model(&provider_name) {
+                // Model names are provider-specific, so the model switches too.
                 current_provider = provider_name.to_lowercase();
-                output.print_dim(&format!("Provider set to {}", current_provider));
+                current_model = model.to_string();
+                output.print_dim(&format!(
+                    "Provider set to {} (model {})",
+                    current_provider, current_model
+                ));
             } else {
                 output.print_dim(&format!(
                     "Unknown provider: {} (supported: openai, anthropic)",
@@ -829,43 +852,63 @@ pub fn run_parallel(args: &ParallelArgs, paths: &CachePaths, output: &OutputStyl
     // The first translation defines the versification we iterate over.
     let base = indexes[0].resolve_all(&references)?;
 
-    if output.is_structured() {
-        let mut arr = Vec::new();
-        for v in &base {
-            let mut obj = serde_json::Map::new();
-            obj.insert(
-                "id".into(),
-                serde_json::Value::String(format!(
-                    "{}.{}.{}",
-                    osis_code(&v.book),
-                    v.chapter,
-                    v.verse
-                )),
-            );
-            obj.insert(
-                "reference".into(),
-                serde_json::Value::String(format!("{} {}:{}", v.book, v.chapter, v.verse)),
-            );
-            let mut tx = serde_json::Map::new();
-            for (i, id) in ids.iter().enumerate() {
-                let text = indexes[i].get(&v.book, v.chapter, v.verse);
-                tx.insert(
-                    id.clone(),
-                    match text {
-                        Some(t) => serde_json::Value::String(t.text.clone()),
-                        None => serde_json::Value::Null,
-                    },
-                );
-            }
-            obj.insert("translations".into(), serde_json::Value::Object(tx));
-            arr.push(serde_json::Value::Object(obj));
+    // Each translation's text for a verse, in --with order (None where missing).
+    let texts = |v: &Verse| -> Vec<Option<&str>> {
+        indexes
+            .iter()
+            .map(|index| {
+                index
+                    .get(&v.book, v.chapter, v.verse)
+                    .map(|t| t.text.as_str())
+            })
+            .collect()
+    };
+
+    match output.format {
+        Format::Plain => {}
+        Format::Json | Format::Ndjson => {
+            let records: Vec<serde_json::Value> = base
+                .iter()
+                .map(|v| {
+                    let translations: serde_json::Map<String, serde_json::Value> = ids
+                        .iter()
+                        .zip(texts(v))
+                        .map(|(id, text)| (id.clone(), serde_json::json!(text)))
+                        .collect();
+                    serde_json::json!({
+                        "id": verse_id(v),
+                        "reference": verse_reference(v),
+                        "translations": translations,
+                    })
+                })
+                .collect();
+            output.emit_json_records(&records);
+            return Ok(());
         }
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&serde_json::Value::Array(arr))
-                .unwrap_or_else(|_| "[]".to_string())
-        );
-        return Ok(());
+        Format::Tsv => {
+            // id, reference, then one text column per translation in --with order.
+            for v in &base {
+                let mut row = vec![verse_id(v), verse_reference(v)];
+                row.extend(texts(v).into_iter().map(|t| t.unwrap_or("").to_string()));
+                println!("{}", row.join("\t"));
+            }
+            return Ok(());
+        }
+        Format::Ref => {
+            for v in &base {
+                println!("{}", verse_reference(v));
+            }
+            return Ok(());
+        }
+        Format::Raw => {
+            // Each translation's text on its own line, verse by verse.
+            for v in &base {
+                for text in texts(v) {
+                    println!("{}", text.unwrap_or(""));
+                }
+            }
+            return Ok(());
+        }
     }
 
     // Human view: per verse, the reference then each translation's text, labeled
@@ -998,6 +1041,21 @@ pub fn run_plan(args: &PlanArgs, paths: &CachePaths, output: &OutputStyle) -> Re
         PlanAction::Start(a) => {
             let plan = find_plan(&a.id)
                 .ok_or_else(|| anyhow::anyhow!("Unknown plan: {}. See `bible plan list`.", a.id))?;
+            // Starting over used to silently wipe the active plan's progress.
+            if let Some(active) = load_state(&paths.root) {
+                if let Some(active_plan) = find_plan(&active.plan_id) {
+                    let done = active.done_count(active_plan.days);
+                    if done > 0 && !a.force {
+                        bail!(
+                            "{} is in progress ({}/{} days done). Run `bible plan start {} --force` to replace it; its progress will be lost.",
+                            active_plan.name,
+                            done,
+                            active_plan.days,
+                            plan.id
+                        );
+                    }
+                }
+            }
             let state = PlanState {
                 plan_id: plan.id.to_string(),
                 started: Local::now().date_naive().format("%Y-%m-%d").to_string(),
@@ -1012,6 +1070,7 @@ pub fn run_plan(args: &PlanArgs, paths: &CachePaths, output: &OutputStyle) -> Re
         }
         PlanAction::Today(a) => run_plan_today(a, paths, output),
         PlanAction::Done(a) => run_plan_done(a, paths),
+        PlanAction::Undo(a) => run_plan_undo(a, paths),
         PlanAction::Status => run_plan_status(paths),
         PlanAction::Stop => {
             match load_state(&paths.root) {
@@ -1149,6 +1208,33 @@ fn run_plan_done(args: &PlanDoneArgs, paths: &CachePaths) -> Result<()> {
     Ok(())
 }
 
+fn run_plan_undo(args: &PlanUndoArgs, paths: &CachePaths) -> Result<()> {
+    let (mut state, plan) = active_plan(paths)?;
+
+    let day = match args.day {
+        Some(day) if state.completed.contains(&day) => day,
+        Some(day) => bail!("Day {} is not marked done.", day),
+        None => match state.completed.iter().max() {
+            Some(&day) => day,
+            None => {
+                println!("Nothing to undo: no days of {} are marked done.", plan.name);
+                return Ok(());
+            }
+        },
+    };
+
+    state.completed.retain(|&d| d != day);
+    save_state(&paths.root, &state)?;
+    println!(
+        "Day {}/{} unmarked — {}/{} days done",
+        day,
+        plan.days,
+        state.done_count(plan.days),
+        plan.days
+    );
+    Ok(())
+}
+
 fn run_plan_status(paths: &CachePaths) -> Result<()> {
     let (state, plan) = active_plan(paths)?;
 
@@ -1170,6 +1256,13 @@ fn run_plan_status(paths: &CachePaths) -> Result<()> {
     let scheduled = scheduled_day(&state, plan);
     if done >= plan.days {
         println!("Complete. Well done!");
+    } else if done > scheduled {
+        let ahead = done - scheduled;
+        println!(
+            "Ahead of pace by {} day{}.",
+            ahead,
+            if ahead == 1 { "" } else { "s" }
+        );
     } else if done + 1 >= scheduled {
         println!("On pace.");
     } else {
@@ -1182,63 +1275,6 @@ fn run_plan_status(paths: &CachePaths) -> Result<()> {
         );
     }
     Ok(())
-}
-
-/// One token-level edit between a base verse and another translation's verse.
-enum DiffOp<'a> {
-    Equal { base_idx: usize, text: &'a str },
-    Insert { text: &'a str },
-    Delete { text: &'a str },
-}
-
-/// Case- and punctuation-insensitive token key, so "world," matches "world".
-fn token_key(token: &str) -> String {
-    token
-        .chars()
-        .filter(|c| c.is_alphanumeric())
-        .flat_map(|c| c.to_lowercase())
-        .collect()
-}
-
-/// Token-level LCS diff from `base` to `other`. Equal ops carry the other
-/// translation's surface form (punctuation may differ) plus the base index.
-fn diff_tokens<'a>(base: &[&'a str], other: &[&'a str]) -> Vec<DiffOp<'a>> {
-    let base_keys: Vec<String> = base.iter().map(|t| token_key(t)).collect();
-    let other_keys: Vec<String> = other.iter().map(|t| token_key(t)).collect();
-    let (n, m) = (base.len(), other.len());
-
-    let idx = |i: usize, j: usize| i * (m + 1) + j;
-    let mut dp = vec![0usize; (n + 1) * (m + 1)];
-    for i in 1..=n {
-        for j in 1..=m {
-            dp[idx(i, j)] = if base_keys[i - 1] == other_keys[j - 1] {
-                dp[idx(i - 1, j - 1)] + 1
-            } else {
-                dp[idx(i - 1, j)].max(dp[idx(i, j - 1)])
-            };
-        }
-    }
-
-    let mut ops = Vec::new();
-    let (mut i, mut j) = (n, m);
-    while i > 0 || j > 0 {
-        if i > 0 && j > 0 && base_keys[i - 1] == other_keys[j - 1] {
-            ops.push(DiffOp::Equal {
-                base_idx: i - 1,
-                text: other[j - 1],
-            });
-            i -= 1;
-            j -= 1;
-        } else if j > 0 && (i == 0 || dp[idx(i, j - 1)] >= dp[idx(i - 1, j)]) {
-            ops.push(DiffOp::Insert { text: other[j - 1] });
-            j -= 1;
-        } else {
-            ops.push(DiffOp::Delete { text: base[i - 1] });
-            i -= 1;
-        }
-    }
-    ops.reverse();
-    ops
 }
 
 pub fn run_diff(args: &DiffArgs, paths: &CachePaths, output: &OutputStyle) -> Result<()> {
@@ -1260,56 +1296,72 @@ pub fn run_diff(args: &DiffArgs, paths: &CachePaths, output: &OutputStyle) -> Re
     let base = indexes[0].resolve_all(&references)?;
     let others = &ids[1..];
 
-    if output.is_structured() {
-        let mut arr = Vec::new();
-        for v in &base {
-            let base_tokens: Vec<&str> = v.text.split_whitespace().collect();
-            let mut obj = serde_json::Map::new();
-            obj.insert(
-                "id".into(),
-                serde_json::Value::String(format!(
-                    "{}.{}.{}",
-                    osis_code(&v.book),
-                    v.chapter,
-                    v.verse
-                )),
-            );
-            obj.insert(
-                "reference".into(),
-                serde_json::Value::String(format!("{} {}:{}", v.book, v.chapter, v.verse)),
-            );
-            obj.insert("base".into(), serde_json::Value::String(ids[0].clone()));
-            let mut diffs = serde_json::Map::new();
-            for (i, id) in others.iter().enumerate() {
-                let value = match indexes[i + 1].get(&v.book, v.chapter, v.verse) {
-                    Some(other) => {
-                        let other_tokens: Vec<&str> = other.text.split_whitespace().collect();
-                        let ops: Vec<serde_json::Value> = diff_tokens(&base_tokens, &other_tokens)
-                            .iter()
-                            .map(|op| {
-                                let (name, text) = match op {
-                                    DiffOp::Equal { text, .. } => ("equal", *text),
-                                    DiffOp::Insert { text } => ("insert", *text),
-                                    DiffOp::Delete { text } => ("delete", *text),
-                                };
-                                serde_json::json!({ "op": name, "text": text })
-                            })
-                            .collect();
-                        serde_json::Value::Array(ops)
-                    }
-                    None => serde_json::Value::Null,
-                };
-                diffs.insert(id.clone(), value);
-            }
-            obj.insert("diffs".into(), serde_json::Value::Object(diffs));
-            arr.push(serde_json::Value::Object(obj));
+    // Each verse's ops against each other translation (None where it lacks the verse).
+    let verse_diffs = |v: &'_ Verse| -> Vec<Option<Vec<(&'static str, String)>>> {
+        let base_tokens: Vec<&str> = v.text.split_whitespace().collect();
+        indexes[1..]
+            .iter()
+            .map(|index| {
+                index.get(&v.book, v.chapter, v.verse).map(|other| {
+                    let other_tokens: Vec<&str> = other.text.split_whitespace().collect();
+                    diff_tokens(&base_tokens, &other_tokens)
+                        .iter()
+                        .map(|op| (op.name(), op.text().to_string()))
+                        .collect()
+                })
+            })
+            .collect()
+    };
+
+    match output.format {
+        Format::Plain => {}
+        Format::Json | Format::Ndjson => {
+            let records: Vec<serde_json::Value> = base
+                .iter()
+                .map(|v| {
+                    let diffs: serde_json::Map<String, serde_json::Value> = others
+                        .iter()
+                        .zip(verse_diffs(v))
+                        .map(|(id, ops)| {
+                            let ops = ops.map(|ops| {
+                                ops.into_iter()
+                                    .map(|(op, text)| serde_json::json!({ "op": op, "text": text }))
+                                    .collect::<Vec<_>>()
+                            });
+                            (id.clone(), serde_json::json!(ops))
+                        })
+                        .collect();
+                    serde_json::json!({
+                        "id": verse_id(v),
+                        "reference": verse_reference(v),
+                        "base": ids[0],
+                        "diffs": diffs,
+                    })
+                })
+                .collect();
+            output.emit_json_records(&records);
+            return Ok(());
         }
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&serde_json::Value::Array(arr))
-                .unwrap_or_else(|_| "[]".to_string())
-        );
-        return Ok(());
+        Format::Tsv => {
+            // Long format, one row per token: id, translation, op, token.
+            for v in &base {
+                for (id, ops) in others.iter().zip(verse_diffs(v)) {
+                    for (op, text) in ops.into_iter().flatten() {
+                        println!("{}\t{}\t{}\t{}", verse_id(v), id, op, text);
+                    }
+                }
+            }
+            return Ok(());
+        }
+        Format::Ref => {
+            for v in &base {
+                println!("{}", verse_reference(v));
+            }
+            return Ok(());
+        }
+        Format::Raw => {
+            bail!("diff has no raw form; use --json, --format ndjson|tsv|ref, or --color never")
+        }
     }
 
     // Human view: per verse, the base line with removals highlighted, then each
@@ -1391,62 +1443,16 @@ pub fn run_diff(args: &DiffArgs, paths: &CachePaths, output: &OutputStyle) -> Re
 mod tests {
     use super::*;
 
-    fn ops_summary(base: &str, other: &str) -> Vec<(char, String)> {
-        let base_tokens: Vec<&str> = base.split_whitespace().collect();
-        let other_tokens: Vec<&str> = other.split_whitespace().collect();
-        diff_tokens(&base_tokens, &other_tokens)
-            .iter()
-            .map(|op| match op {
-                DiffOp::Equal { text, .. } => ('=', text.to_string()),
-                DiffOp::Insert { text } => ('+', text.to_string()),
-                DiffOp::Delete { text } => ('-', text.to_string()),
-            })
-            .collect()
-    }
-
     #[test]
-    fn diff_identical_text_is_all_equal() {
-        let ops = ops_summary("For God so loved", "For God so loved");
-        assert!(ops.iter().all(|(op, _)| *op == '='));
-        assert_eq!(ops.len(), 4);
-    }
-
-    #[test]
-    fn diff_marks_insertions_and_deletions() {
-        let ops = ops_summary("the only begotten Son", "the only Son");
+    fn each_provider_gets_its_own_default_model() {
+        assert_eq!(resolve_model("openai", None).unwrap(), "gpt-4o-mini");
+        assert!(resolve_model("Anthropic", None)
+            .unwrap()
+            .starts_with("claude-"));
         assert_eq!(
-            ops,
-            vec![
-                ('=', "the".to_string()),
-                ('=', "only".to_string()),
-                ('-', "begotten".to_string()),
-                ('=', "Son".to_string()),
-            ]
+            resolve_model("anthropic", Some("my-model")).unwrap(),
+            "my-model"
         );
-
-        let ops = ops_summary("he gave", "he freely gave");
-        assert_eq!(
-            ops,
-            vec![
-                ('=', "he".to_string()),
-                ('+', "freely".to_string()),
-                ('=', "gave".to_string()),
-            ]
-        );
-    }
-
-    #[test]
-    fn diff_ignores_case_and_punctuation_for_matching() {
-        // "world," matches "World" — equal ops keep the other's surface form.
-        let ops = ops_summary("the world, he", "the World he");
-        assert!(ops.iter().all(|(op, _)| *op == '='));
-        assert_eq!(ops[1].1, "World");
-    }
-
-    #[test]
-    fn diff_handles_empty_sides() {
-        assert!(ops_summary("", "").is_empty());
-        assert!(ops_summary("a b", "").iter().all(|(op, _)| *op == '-'));
-        assert!(ops_summary("", "a b").iter().all(|(op, _)| *op == '+'));
+        assert!(resolve_model("gemini", None).is_err());
     }
 }

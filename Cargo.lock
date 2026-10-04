@@ -134,6 +134,7 @@ dependencies = [
  "crossterm 0.28.1",
  "futures",
  "indicatif",
+ "libc",
  "rand 0.8.5",
  "ratatui",
  "regex",

@@ -50,11 +50,21 @@ pub fn verses_to_json(verses: &[&Verse]) -> String {
     serde_json::to_string_pretty(&records).unwrap_or_else(|_| "[]".to_string())
 }
 
+/// Stable OSIS-style verse id for joins, e.g. `John.3.16` or `1Cor.13.4`.
+pub fn verse_id(v: &Verse) -> String {
+    format!("{}.{}.{}", osis_code(&v.book), v.chapter, v.verse)
+}
+
+/// Human reference, e.g. `John 3:16`.
+pub fn verse_reference(v: &Verse) -> String {
+    format!("{} {}:{}", v.book, v.chapter, v.verse)
+}
+
 impl<'a> VerseRecord<'a> {
     fn new(v: &'a Verse) -> Self {
         Self {
-            id: format!("{}.{}.{}", osis_code(&v.book), v.chapter, v.verse),
-            reference: format!("{} {}:{}", v.book, v.chapter, v.verse),
+            id: verse_id(v),
+            reference: verse_reference(v),
             book: &v.book,
             chapter: v.chapter,
             verse: v.verse,
@@ -128,16 +138,14 @@ impl OutputStyle {
             }
             Format::Ref => {
                 for v in verses {
-                    println!("{} {}:{}", v.book, v.chapter, v.verse);
+                    println!("{}", verse_reference(v));
                 }
             }
             Format::Tsv => {
                 for v in verses {
                     println!(
-                        "{}.{}.{}\t{}\t{}\t{}\t{}",
-                        osis_code(&v.book),
-                        v.chapter,
-                        v.verse,
+                        "{}\t{}\t{}\t{}\t{}",
+                        verse_id(v),
                         v.book,
                         v.chapter,
                         v.verse,
@@ -159,6 +167,22 @@ impl OutputStyle {
                     Ok(json) => println!("{}", json),
                     Err(_) => println!("[]"),
                 }
+            }
+        }
+    }
+
+    /// Emit non-verse records (parallel, diff, books, ...): a pretty JSON array
+    /// for `json`, one compact object per line for `ndjson`. Callers render
+    /// the other formats themselves.
+    pub fn emit_json_records(&self, records: &[serde_json::Value]) {
+        if self.format == Format::Ndjson {
+            for record in records {
+                println!("{}", record);
+            }
+        } else {
+            match serde_json::to_string_pretty(records) {
+                Ok(json) => println!("{}", json),
+                Err(_) => println!("[]"),
             }
         }
     }

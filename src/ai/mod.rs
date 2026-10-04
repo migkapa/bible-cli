@@ -37,6 +37,16 @@ pub enum AiProvider {
 }
 
 impl AiProvider {
+    /// The model used when `--model` is not given. Each provider needs its own:
+    /// one model name for both meant Anthropic was always sent an OpenAI model.
+    pub fn default_model(name: &str) -> Option<&'static str> {
+        match name.to_lowercase().as_str() {
+            "openai" => Some("gpt-4o-mini"),
+            "anthropic" => Some("claude-haiku-4-5-20251001"),
+            _ => None,
+        }
+    }
+
     pub fn from_name(name: &str) -> Result<Self> {
         match name.to_lowercase().as_str() {
             "openai" => Ok(Self::OpenAi(OpenAiClient::new()?)),

@@ -110,6 +110,8 @@ pub enum PlanAction {
     Today(PlanTodayArgs),
     /// Mark a day's reading as done.
     Done(PlanDoneArgs),
+    /// Unmark a day marked done by mistake (default: the highest done day).
+    Undo(PlanUndoArgs),
     /// Show progress through the active plan.
     Status,
     /// Stop the active plan and clear its progress.
@@ -120,6 +122,10 @@ pub enum PlanAction {
 pub struct PlanStartArgs {
     /// Plan id (see `bible plan list`).
     pub id: String,
+
+    /// Replace an active plan that has progress (its progress is lost).
+    #[arg(long)]
+    pub force: bool,
 }
 
 #[derive(Args)]
@@ -136,6 +142,13 @@ pub struct PlanTodayArgs {
 #[derive(Args)]
 pub struct PlanDoneArgs {
     /// Mark a specific day instead of the next unread one.
+    #[arg(long, value_name = "N")]
+    pub day: Option<u32>,
+}
+
+#[derive(Args)]
+pub struct PlanUndoArgs {
+    /// Unmark a specific day.
     #[arg(long, value_name = "N")]
     pub day: Option<u32>,
 }
@@ -337,11 +350,14 @@ pub struct AiArgs {
     #[arg(required = true)]
     pub reference: Vec<String>,
 
+    /// AI provider: openai or anthropic.
     #[arg(long, default_value = "openai")]
     pub provider: String,
 
-    #[arg(long, default_value = "gpt-4o-mini")]
-    pub model: String,
+    /// Model name (default: gpt-4o-mini for openai, claude-haiku-4-5-20251001
+    /// for anthropic).
+    #[arg(long)]
+    pub model: Option<String>,
 
     #[arg(long, default_value_t = 256)]
     pub max_tokens: u32,

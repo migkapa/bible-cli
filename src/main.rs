@@ -3,6 +3,8 @@ mod books;
 mod cache;
 mod cli;
 mod commands;
+mod diff;
+mod hashing;
 mod moods;
 mod output;
 mod plans;
@@ -19,6 +21,15 @@ use crate::cli::{Cli, Commands};
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
+
+    // Network commands keep Rust's ignored SIGPIPE, so a write to a closed
+    // socket surfaces as an error instead of silently killing the process.
+    if !matches!(
+        cli.command,
+        Commands::Ai(_) | Commands::Cache(_) | Commands::Translation(_)
+    ) {
+        restore_default_sigpipe();
+    }
 
     // Completions need no cache or data; handle before any loading.
     if let Commands::Completions(args) = &cli.command {
@@ -72,3 +83,18 @@ async fn main() -> Result<()> {
         Commands::Completions(_) => unreachable!("handled above"),
     }
 }
+
+/// Exit quietly when stdout is a closed pipe (`bible search love | head`), as
+/// Unix tools do, instead of panicking inside `println!`. Rust ignores SIGPIPE
+/// by default, which turns every write to a closed pipe into an error.
+#[cfg(unix)]
+fn restore_default_sigpipe() {
+    // SAFETY: restoring the default disposition of a signal is async-signal-safe
+    // and has no effect beyond how this process reacts to SIGPIPE.
+    unsafe {
+        libc::signal(libc::SIGPIPE, libc::SIG_DFL);
+    }
+}
+
+#[cfg(not(unix))]
+fn restore_default_sigpipe() {}
