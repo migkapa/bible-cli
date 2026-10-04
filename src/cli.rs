@@ -69,6 +69,8 @@ pub enum Commands {
     Topic(TopicArgs),
     /// List the books of the Bible with chapter and verse counts.
     Books(BooksArgs),
+    /// Practice memorizing a passage: hide words progressively, or quiz yourself.
+    Memorize(MemorizeArgs),
     /// Manage installed translations.
     Translation(TranslationArgs),
     /// Generate a shell completion script (bash, zsh, fish, powershell, elvish).
@@ -175,6 +177,26 @@ pub struct ExportArgs {
     /// Export target format.
     #[arg(long, value_enum, default_value_t = ExportTarget::Md)]
     pub to: ExportTarget,
+}
+
+#[derive(Args)]
+pub struct MemorizeArgs {
+    #[arg(required = true)]
+    pub reference: Vec<String>,
+
+    /// How much to hide: 0 = full text, 1-3 = a quarter, half, or three
+    /// quarters of the words, 4 = first letters only, 5 = every word
+    /// [default: 2]. With --quiz, shows that level as a hint.
+    #[arg(long, value_parser = clap::value_parser!(u8).range(0..=5))]
+    pub level: Option<u8>,
+
+    /// Recite each verse from memory and get it scored word by word.
+    #[arg(long)]
+    pub quiz: bool,
+
+    /// Change which words are hidden (the same seed always hides the same words).
+    #[arg(long, default_value_t = 0)]
+    pub seed: u64,
 }
 
 #[derive(Args)]

@@ -5,6 +5,7 @@ mod cli;
 mod commands;
 mod diff;
 mod hashing;
+mod memorize;
 mod moods;
 mod output;
 mod plans;
@@ -80,6 +81,7 @@ async fn main() -> Result<()> {
         Commands::Export(args) => commands::run_export(args, &paths, &output),
         Commands::Topic(args) => commands::run_topic(args, &paths, &output),
         Commands::Books(args) => commands::run_books(args, &paths, &output),
+        Commands::Memorize(args) => commands::run_memorize(args, &paths, &output),
         Commands::Translation(args) => commands::run_translation(args, &paths),
         Commands::Completions(_) => unreachable!("handled above"),
     }

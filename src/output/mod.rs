@@ -317,6 +317,15 @@ impl OutputStyle {
         self.span(text, Color::Red)
     }
 
+    /// A word missed in a memorization quiz: red, or `[bracketed]` without color.
+    pub fn missed_span(&self, text: &str) -> String {
+        if self.color {
+            self.span(text, Color::Red)
+        } else {
+            format!("[{}]", text)
+        }
+    }
+
     fn span(&self, text: &str, color: Color) -> String {
         if self.color {
             format!("{}{}{}", SetForegroundColor(color), text, ResetColor)

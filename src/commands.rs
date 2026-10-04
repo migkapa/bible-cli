@@ -5,7 +5,7 @@ use rand::rngs::StdRng;
 use rand::seq::SliceRandom;
 use rand::{thread_rng, SeedableRng};
 use regex::RegexBuilder;
-use std::io::{self, Write};
+use std::io::{self, BufRead, Write};
 use tokio::io::{AsyncBufReadExt, BufReader};
 
 use crate::ai::{AiProvider, ChatMessage, ProviderRequest, StreamEvent};
@@ -16,13 +16,14 @@ use crate::cache::{
     save_default_translation, CachePaths, DEFAULT_TRANSLATION,
 };
 use crate::cli::{
-    AiArgs, BooksArgs, CacheArgs, DiffArgs, EchoArgs, ExportArgs, ExportTarget, MoodArgs,
-    ParallelArgs, PlanAction, PlanArgs, PlanDoneArgs, PlanTodayArgs, PlanUndoArgs, RandomArgs,
-    ReadArgs, SearchArgs, Testament, TodayArgs, TopicArgs, TranslationAction, TranslationArgs,
-    TuiArgs,
+    AiArgs, BooksArgs, CacheArgs, DiffArgs, EchoArgs, ExportArgs, ExportTarget, MemorizeArgs,
+    MoodArgs, ParallelArgs, PlanAction, PlanArgs, PlanDoneArgs, PlanTodayArgs, PlanUndoArgs,
+    RandomArgs, ReadArgs, SearchArgs, Testament, TodayArgs, TopicArgs, TranslationAction,
+    TranslationArgs, TuiArgs,
 };
 use crate::diff::{diff_tokens, DiffOp};
 use crate::hashing::splitmix64;
+use crate::memorize::{cloze, score_recall, verse_salt, word_count, MAX_LEVEL};
 use crate::moods::{all_moods, find_mood};
 use crate::output::{
     verse_id, verse_reference, Format, MarkdownRenderer, OutputStyle, ThinkingIndicator,
@@ -879,6 +880,118 @@ pub fn run_books(args: &BooksArgs, paths: &CachePaths, output: &OutputStyle) -> 
                 println!("{}", r.name);
             }
         }
+    }
+    Ok(())
+}
+
+pub fn run_memorize(args: &MemorizeArgs, paths: &CachePaths, output: &OutputStyle) -> Result<()> {
+    let references = parse_references(&args.reference)?;
+    let verses = load_active(paths)?;
+    let index = VerseIndex::build(&verses);
+    let selected = index.resolve_all(&references)?;
+
+    if args.quiz {
+        if output.is_structured() {
+            bail!("--quiz is interactive and has no structured output; drop the format flag");
+        }
+        return run_memorize_quiz(&selected, args, output);
+    }
+
+    // Practice text goes through the normal renderer, so every format works.
+    let level = args.level.unwrap_or(2);
+    let practice: Vec<Verse> = selected
+        .iter()
+        .map(|v| Verse {
+            book: v.book.clone(),
+            chapter: v.chapter,
+            verse: v.verse,
+            text: cloze(&v.text, level, verse_salt(v, args.seed)),
+        })
+        .collect();
+    let practice_refs: Vec<&Verse> = practice.iter().collect();
+    output.emit_verses(&practice_refs);
+
+    if output.interactive {
+        output.print_dim(&if level < MAX_LEVEL {
+            format!(
+                "Level {}/{}. Next: --level {}, or test yourself with --quiz.",
+                level,
+                MAX_LEVEL,
+                level + 1
+            )
+        } else {
+            format!("Level {}/{}. Test yourself with --quiz.", level, MAX_LEVEL)
+        });
+    }
+    Ok(())
+}
+
+/// Prompt for each verse in turn, score the recitation word by word, and show
+/// what was missed.
+fn run_memorize_quiz(selected: &[&Verse], args: &MemorizeArgs, output: &OutputStyle) -> Result<()> {
+    output.print_dim(
+        "Type each verse from memory and press Enter (Enter alone reveals it; Ctrl-D stops).",
+    );
+    let mut lines = io::stdin().lock().lines();
+    let (mut correct, mut total, mut answered) = (0, 0, 0);
+
+    for v in selected {
+        println!();
+        output.print_reference_heading(&format!(
+            "{} ({} words)",
+            verse_reference(v),
+            word_count(&v.text)
+        ));
+        if let Some(level) = args.level {
+            println!("  {}", cloze(&v.text, level, verse_salt(v, args.seed)));
+        }
+        print!("> ");
+        io::stdout().flush()?;
+        let Some(line) = lines.next() else {
+            println!();
+            break;
+        };
+        let line = line?;
+
+        let recall = score_recall(&v.text, &line);
+        answered += 1;
+        correct += recall.correct;
+        total += recall.total;
+
+        let feedback: Vec<String> = recall
+            .tokens
+            .iter()
+            .map(|&(token, recalled)| {
+                if recalled {
+                    output.added_span(token)
+                } else {
+                    output.missed_span(token)
+                }
+            })
+            .collect();
+        println!("  {}", feedback.join(" "));
+        let mut summary = format!(
+            "  {}/{} words ({}%)",
+            recall.correct,
+            recall.total,
+            recall.percent()
+        );
+        if recall.extra > 0 {
+            summary.push_str(&format!(", {} extra", recall.extra));
+        }
+        if recall.is_perfect() {
+            summary.push_str(" — perfect!");
+        }
+        output.print_dim(&summary);
+    }
+
+    if answered > 1 {
+        println!();
+        let percent = (correct * 100).checked_div(total).unwrap_or(100);
+        println!(
+            "Score: {}/{} words ({}%) across {} verses",
+            correct, total, percent, answered
+        );
     }
     Ok(())
 }
