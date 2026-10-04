@@ -46,6 +46,7 @@ async fn main() -> Result<()> {
         .data_dir
         .clone()
         .unwrap_or_else(cache::default_cache_root);
+    cache::migrate_legacy_ids(&root);
     let translation = match cli.translation.as_deref() {
         Some(id) => cache::normalize_translation_id(id)?,
         None => cache::load_default_translation(&root)

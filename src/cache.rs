@@ -195,6 +195,26 @@ pub fn preload(paths: &CachePaths, id: &str, source: Option<&str>) -> Result<usi
     Ok(verses.len())
 }
 
+/// Before 0.7, ids were case-sensitive, so `translation add WEB --source ...`
+/// created `translations/WEB`. Ids are lowercase now; rename such directories
+/// so they stay reachable (and removable). A no-op once migrated, and on
+/// case-insensitive filesystems, where the lowercase path already resolves.
+pub fn migrate_legacy_ids(root: &Path) {
+    let Ok(entries) = fs::read_dir(root.join("translations")) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().to_string();
+        let Ok(id) = normalize_translation_id(&name) else {
+            continue;
+        };
+        let target = entry.path().with_file_name(&id);
+        if id != name && entry.path().is_dir() && !target.exists() {
+            let _ = fs::rename(entry.path(), target);
+        }
+    }
+}
+
 /// List every translation present in the cache, sorted by id.
 pub fn installed_translations(paths: &CachePaths) -> Vec<InstalledTranslation> {
     let mut out = Vec::new();
@@ -205,7 +225,10 @@ pub fn installed_translations(paths: &CachePaths) -> Vec<InstalledTranslation> {
         if !entry.path().is_dir() {
             continue;
         }
-        let id = entry.file_name().to_string_lossy().to_string();
+        let name = entry.file_name().to_string_lossy().to_string();
+        // Report ids as the CLI accepts them (a legacy "WEB" on a
+        // case-insensitive filesystem lists as "web").
+        let id = normalize_translation_id(&name).unwrap_or(name);
         let verses_path = paths.verses_path_for(&id);
         if !verses_path.exists() {
             continue;
@@ -672,6 +695,30 @@ mod tests {
         assert!(remove_translation(&paths, "KJV").unwrap());
         assert!(!remove_translation(&paths, "kjv").unwrap());
         let _ = fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn legacy_uppercase_ids_are_migrated() {
+        let root = temp_dir("migrate");
+        let translations = root.join("translations");
+        fs::create_dir_all(translations.join("WEB")).unwrap();
+        fs::write(translations.join("WEB").join("verses.jsonl"), "{}\n").unwrap();
+        fs::create_dir_all(translations.join("kjv")).unwrap();
+
+        migrate_legacy_ids(&root);
+        let paths = CachePaths::new(root.clone(), "web".to_string());
+        assert!(paths.is_installed("web"));
+        assert!(translations.join("kjv").exists());
+        let ids: Vec<String> = installed_translations(&paths)
+            .into_iter()
+            .map(|t| t.id)
+            .collect();
+        assert_eq!(ids, ["web"]);
+
+        // Idempotent.
+        migrate_legacy_ids(&root);
+        assert!(paths.is_installed("web"));
+        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]

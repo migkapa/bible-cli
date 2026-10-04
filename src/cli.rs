@@ -5,11 +5,17 @@ use std::path::PathBuf;
 pub use crate::output::Format;
 
 #[derive(Parser)]
-#[command(name = "bible", version, about = "A fast, playful Bible CLI (KJV MVP)")]
+#[command(
+    name = "bible",
+    version,
+    about = "A fast, playful Bible CLI: read, search, compare, and memorize scripture"
+)]
 pub struct Cli {
+    /// Where translations, bookmarks, and plan progress live [default: ~/.bible-cli].
     #[arg(long, global = true, value_name = "DIR")]
     pub data_dir: Option<PathBuf>,
 
+    /// When to color output.
     #[arg(long, global = true, value_enum, default_value_t = ColorMode::Auto)]
     pub color: ColorMode,
 
@@ -48,14 +54,23 @@ impl Cli {
 
 #[derive(Subcommand)]
 pub enum Commands {
+    /// Read a verse, range, chapter, or list of passages.
     Read(ReadArgs),
+    /// Search the text for a word, phrase, or regex.
     Search(SearchArgs),
+    /// The verse of the day, with a reflection prompt.
     Today(TodayArgs),
+    /// Draw random verses.
     Random(RandomArgs),
+    /// Show a verse or range with the verses around it.
     Echo(EchoArgs),
+    /// Verses for a mood (peace, courage, wisdom, hope, gratitude).
     Mood(MoodArgs),
+    /// Download the active translation or show cache status.
     Cache(CacheArgs),
+    /// Ask an AI model to reflect on a passage, or chat about it.
     Ai(AiArgs),
+    /// Browse the Bible in a full-screen terminal reader.
     Tui(TuiArgs),
     /// Compare a passage across translations side by side.
     Parallel(ParallelArgs),
