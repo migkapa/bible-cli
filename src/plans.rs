@@ -182,9 +182,21 @@ fn state_path(root: &Path) -> PathBuf {
     root.join("plan.json")
 }
 
-pub fn load_state(root: &Path) -> Option<PlanState> {
-    let raw = fs::read_to_string(state_path(root)).ok()?;
-    serde_json::from_str(&raw).ok()
+/// The active plan, if any. A missing file means no plan; an unreadable one is
+/// an error, so a new `plan start` cannot silently replace the progress in it.
+pub fn load_state(root: &Path) -> Result<Option<PlanState>> {
+    let path = state_path(root);
+    let raw = match fs::read_to_string(&path) {
+        Ok(raw) => raw,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(err) => return Err(err).with_context(|| format!("Failed reading {}", path.display())),
+    };
+    serde_json::from_str(&raw).map(Some).with_context(|| {
+        format!(
+            "{} is not a valid plan file; fix it, or run `bible plan stop` to discard it",
+            path.display()
+        )
+    })
 }
 
 pub fn save_state(root: &Path, state: &PlanState) -> Result<()> {
@@ -345,7 +357,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("bible-plan-test-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
 
-        assert!(load_state(&dir).is_none());
+        assert!(load_state(&dir).unwrap().is_none());
         let state = PlanState {
             plan_id: "nt-90".to_string(),
             started: "2026-07-04".to_string(),
@@ -353,7 +365,7 @@ mod tests {
         };
         save_state(&dir, &state).unwrap();
 
-        let loaded = load_state(&dir).unwrap();
+        let loaded = load_state(&dir).unwrap().unwrap();
         assert_eq!(loaded.plan_id, "nt-90");
         assert_eq!(loaded.completed, vec![1, 2, 4]);
         // Day 3 was skipped, so it is next.
@@ -362,7 +374,12 @@ mod tests {
 
         assert!(clear_state(&dir).unwrap());
         assert!(!clear_state(&dir).unwrap());
-        assert!(load_state(&dir).is_none());
+        assert!(load_state(&dir).unwrap().is_none());
+
+        // A corrupt file is an error, not "no plan".
+        fs::write(state_path(&dir), "{bad").unwrap();
+        assert!(load_state(&dir).is_err());
+        assert!(clear_state(&dir).unwrap());
 
         let _ = fs::remove_dir_all(&dir);
     }

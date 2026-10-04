@@ -18,18 +18,23 @@ mod verses;
 use anyhow::Result;
 use clap::{CommandFactory, Parser};
 
-use crate::cli::{Cli, Commands};
+use crate::cli::{Cli, Commands, TranslationAction};
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
 
-    // Network commands keep Rust's ignored SIGPIPE, so a write to a closed
-    // socket surfaces as an error instead of silently killing the process.
-    if !matches!(
-        cli.command,
-        Commands::Ai(_) | Commands::Cache(_) | Commands::Translation(_)
-    ) {
+    // Commands that touch the network keep Rust's ignored SIGPIPE, so a write
+    // to a closed socket surfaces as an error instead of silently killing the
+    // process. Everything else (including `translation list`) exits quietly
+    // when piped into `head`.
+    let uses_network = match &cli.command {
+        Commands::Ai(_) => true,
+        Commands::Cache(args) => args.preload,
+        Commands::Translation(args) => matches!(args.action, TranslationAction::Add(_)),
+        _ => false,
+    };
+    if !uses_network {
         restore_default_sigpipe();
     }
 
@@ -46,7 +51,6 @@ async fn main() -> Result<()> {
         .data_dir
         .clone()
         .unwrap_or_else(cache::default_cache_root);
-    cache::migrate_legacy_ids(&root);
     let translation = match cli.translation.as_deref() {
         Some(id) => cache::normalize_translation_id(id)?,
         None => cache::load_default_translation(&root)

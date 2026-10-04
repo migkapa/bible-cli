@@ -129,8 +129,20 @@ impl CachePaths {
         self.root.join("translations")
     }
 
+    /// The directory for an id. Before 0.7 ids were case-sensitive, so an
+    /// install made then as `translations/WEB` is still found for `web`.
     pub fn dir_for(&self, id: &str) -> PathBuf {
-        self.translations_root().join(id)
+        let exact = self.translations_root().join(id);
+        if exact.exists() {
+            return exact;
+        }
+        fs::read_dir(self.translations_root())
+            .into_iter()
+            .flatten()
+            .flatten()
+            .find(|entry| entry.file_name().to_string_lossy().eq_ignore_ascii_case(id))
+            .map(|entry| entry.path())
+            .unwrap_or(exact)
     }
 
     pub fn verses_path_for(&self, id: &str) -> PathBuf {
@@ -195,50 +207,35 @@ pub fn preload(paths: &CachePaths, id: &str, source: Option<&str>) -> Result<usi
     Ok(verses.len())
 }
 
-/// Before 0.7, ids were case-sensitive, so `translation add WEB --source ...`
-/// created `translations/WEB`. Ids are lowercase now; rename such directories
-/// so they stay reachable (and removable). A no-op once migrated, and on
-/// case-insensitive filesystems, where the lowercase path already resolves.
-pub fn migrate_legacy_ids(root: &Path) {
-    let Ok(entries) = fs::read_dir(root.join("translations")) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        let name = entry.file_name().to_string_lossy().to_string();
-        let Ok(id) = normalize_translation_id(&name) else {
-            continue;
-        };
-        let target = entry.path().with_file_name(&id);
-        if id != name && entry.path().is_dir() && !target.exists() {
-            let _ = fs::rename(entry.path(), target);
-        }
-    }
-}
-
-/// List every translation present in the cache, sorted by id.
+/// List every translation present in the cache, sorted by id. Directory names
+/// are reported as the lowercase ids the CLI accepts; when a pre-0.7 `KJV/`
+/// sits beside `kjv/`, the exact-case one is listed (and used).
 pub fn installed_translations(paths: &CachePaths) -> Vec<InstalledTranslation> {
-    let mut out = Vec::new();
+    let mut out: Vec<InstalledTranslation> = Vec::new();
     let Ok(entries) = fs::read_dir(paths.translations_root()) else {
         return out;
     };
     for entry in entries.flatten() {
-        if !entry.path().is_dir() {
+        let dir = entry.path();
+        let verses_path = dir.join("verses.jsonl");
+        if !verses_path.is_file() {
             continue;
         }
         let name = entry.file_name().to_string_lossy().to_string();
-        // Report ids as the CLI accepts them (a legacy "WEB" on a
-        // case-insensitive filesystem lists as "web").
-        let id = normalize_translation_id(&name).unwrap_or(name);
-        let verses_path = paths.verses_path_for(&id);
-        if !verses_path.exists() {
+        // Names that are not valid ids cannot be selected, so are not listed.
+        let Ok(id) = normalize_translation_id(&name) else {
             continue;
+        };
+        if let Some(existing) = out.iter().position(|t| t.id == id) {
+            if name != id {
+                continue;
+            }
+            out.remove(existing);
         }
-        let size_bytes = fs::metadata(&verses_path).map(|m| m.len()).unwrap_or(0);
-        let manifest = read_manifest(&paths.manifest_path_for(&id));
         out.push(InstalledTranslation {
             id,
-            manifest,
-            size_bytes,
+            manifest: read_manifest(&dir.join("manifest.json")),
+            size_bytes: fs::metadata(&verses_path).map(|m| m.len()).unwrap_or(0),
         });
     }
     out.sort_by(|a, b| a.id.cmp(&b.id));
@@ -248,10 +245,11 @@ pub fn installed_translations(paths: &CachePaths) -> Vec<InstalledTranslation> {
 /// Remove an installed translation's directory. Returns false if it was absent.
 pub fn remove_translation(paths: &CachePaths, id: &str) -> Result<bool> {
     // Re-validate here too: this is the one destructive path, so it must never
-    // trust its caller to have rejected ids like "../..".
+    // trust its caller to have rejected ids like "../..". And only a real
+    // install (one with verses.jsonl) is ever deleted.
     let id = normalize_translation_id(id)?;
     let dir = paths.dir_for(&id);
-    if !dir.is_dir() {
+    if !dir.join("verses.jsonl").is_file() {
         return Ok(false);
     }
     fs::remove_dir_all(&dir).with_context(|| format!("Failed removing {}", dir.display()))?;
@@ -287,13 +285,20 @@ pub fn save_default_translation(root: &Path, id: Option<&str>) -> Result<()> {
 /// Write a file via a temporary sibling and a rename, so an interrupted write
 /// can never leave a truncated cache, config, or progress file behind.
 pub fn write_atomic(path: &Path, contents: &[u8]) -> Result<()> {
-    let file_name = path
+    // Write through a symlink (say, a config kept in a dotfiles repo) instead
+    // of replacing the link with a regular file.
+    let target = fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let file_name = target
         .file_name()
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_default();
-    let tmp = path.with_file_name(format!("{}.tmp", file_name));
+    // Per-process temp name, so two concurrent writers never share one.
+    let tmp = target.with_file_name(format!(".{}.{}.tmp", file_name, std::process::id()));
     fs::write(&tmp, contents).with_context(|| format!("Failed writing {}", tmp.display()))?;
-    fs::rename(&tmp, path).with_context(|| format!("Failed writing {}", path.display()))?;
+    if let Err(err) = fs::rename(&tmp, &target) {
+        let _ = fs::remove_file(&tmp);
+        return Err(err).with_context(|| format!("Failed writing {}", target.display()));
+    }
     Ok(())
 }
 
@@ -680,6 +685,7 @@ mod tests {
         fs::write(home.join("precious.txt"), "keep me").unwrap();
         let paths = CachePaths::new(root.clone(), "kjv".to_string());
         fs::create_dir_all(paths.dir_for("kjv")).unwrap();
+        fs::write(paths.verses_path_for("kjv"), "{}\n").unwrap();
 
         for bad in ["..", "../..", "../../.."] {
             assert!(
@@ -698,26 +704,48 @@ mod tests {
     }
 
     #[test]
-    fn legacy_uppercase_ids_are_migrated() {
-        let root = temp_dir("migrate");
+    fn legacy_uppercase_ids_resolve_without_renaming_anything() {
+        let root = temp_dir("legacy");
         let translations = root.join("translations");
         fs::create_dir_all(translations.join("WEB")).unwrap();
         fs::write(translations.join("WEB").join("verses.jsonl"), "{}\n").unwrap();
-        fs::create_dir_all(translations.join("kjv")).unwrap();
+        // Not a translation install (no verses.jsonl): must never be touched.
+        fs::create_dir_all(translations.join("en_US")).unwrap();
+        fs::write(translations.join("en_US").join("messages.json"), "{}").unwrap();
 
-        migrate_legacy_ids(&root);
         let paths = CachePaths::new(root.clone(), "web".to_string());
         assert!(paths.is_installed("web"));
-        assert!(translations.join("kjv").exists());
+        assert!(translations.join("WEB").exists(), "no rename");
         let ids: Vec<String> = installed_translations(&paths)
             .into_iter()
             .map(|t| t.id)
             .collect();
         assert_eq!(ids, ["web"]);
 
-        // Idempotent.
-        migrate_legacy_ids(&root);
-        assert!(paths.is_installed("web"));
+        // Removing a non-install is refused, so unrelated folders survive.
+        assert!(!remove_translation(&paths, "en_us").unwrap());
+        assert!(translations.join("en_US").join("messages.json").exists());
+        assert!(remove_translation(&paths, "web").unwrap());
+        assert!(!paths.is_installed("web"));
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn atomic_writes_follow_symlinks() {
+        let root = temp_dir("symlink");
+        fs::create_dir_all(root.join("dotfiles")).unwrap();
+        let real = root.join("dotfiles").join("config.json");
+        fs::write(&real, "old").unwrap();
+        let link = root.join("config.json");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+
+        write_atomic(&link, b"new").unwrap();
+        assert!(fs::symlink_metadata(&link)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert_eq!(fs::read_to_string(&real).unwrap(), "new");
         let _ = fs::remove_dir_all(&root);
     }
 
@@ -735,7 +763,12 @@ mod tests {
         let count = preload(&paths, "Tiny", Some(source.to_str().unwrap())).unwrap();
         assert_eq!(count, 1);
         assert!(paths.is_installed("tiny"));
-        assert!(!paths.dir_for("tiny").join("verses.jsonl.tmp").exists());
+        let leftovers: Vec<_> = fs::read_dir(paths.dir_for("tiny"))
+            .unwrap()
+            .flatten()
+            .filter(|e| e.file_name().to_string_lossy().ends_with(".tmp"))
+            .collect();
+        assert!(leftovers.is_empty(), "temp files left behind");
         assert_eq!(
             read_manifest(&paths.manifest_path_for("tiny"))
                 .unwrap()

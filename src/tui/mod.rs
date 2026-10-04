@@ -154,6 +154,7 @@ mod tests {
     fn bad_start_ref_is_an_error() {
         assert!(App::new(corpus(), None, Some("John 3:99".into()), "kjv".into()).is_err());
         assert!(App::new(corpus(), None, Some("Hezekiah 1".into()), "kjv".into()).is_err());
+        assert!(App::new(corpus(), None, Some("John 0".into()), "kjv".into()).is_err());
     }
 
     #[test]

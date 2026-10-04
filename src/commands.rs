@@ -34,7 +34,7 @@ use crate::plans::{
     all_plans, build_days, clear_state, find_plan, load_state, portion_label, save_state, PlanDef,
     PlanState,
 };
-use crate::reference::{parse_reference, parse_references};
+use crate::reference::{format_references, parse_reference, parse_references};
 use crate::topics::{all_topics, find_topic};
 use crate::tui;
 use crate::verses::{load_verses, Verse, VerseIndex};
@@ -1011,8 +1011,11 @@ fn run_bookmark_add(args: &BookmarkAddArgs, paths: &CachePaths) -> Result<()> {
     let references = parse_references(&args.reference)?;
     let verses = load_active(paths)?;
     let index = VerseIndex::build(&verses);
-    // Store the canonical label, so "jn 3:16" and "John 3:16" are one bookmark.
-    let label = index.label(&index.resolve_all(&references)?);
+    // The passage must exist here, but the stored label is the parsed form of
+    // what was typed ("jn 3:16" -> "John 3:16"), which no translation's
+    // versification can change.
+    index.resolve_all(&references)?;
+    let label = format_references(&references);
     let tags: Vec<String> = args.tags.iter().filter_map(|t| normalize_tag(t)).collect();
     let note = args
         .note
@@ -1070,23 +1073,30 @@ fn run_bookmark_remove(args: &BookmarkRemoveArgs, paths: &CachePaths) -> Result<
             bookmarks.len()
         ),
         None => {
-            // Match by the verses a reference covers, so any spelling of the
-            // passage ("jn 3:16", "John 3:16") finds it.
             let references = parse_references(&args.target)?;
-            let verses = load_active(paths)?;
-            let index = VerseIndex::build(&verses);
-            let wanted = index.resolve_all(&references)?;
-            let same = |a: &[&Verse], b: &[&Verse]| {
-                a.len() == b.len() && a.iter().zip(b).all(|(x, y)| std::ptr::eq(*x, *y))
-            };
-            bookmarks
-                .iter()
-                .position(|b| {
-                    parse_references(std::slice::from_ref(&b.reference))
-                        .and_then(|refs| index.resolve_all(&refs))
-                        .is_ok_and(|have| same(&have, &wanted))
-                })
-                .ok_or_else(|| anyhow::anyhow!("No bookmark for {}", index.label(&wanted)))?
+            let label = format_references(&references);
+            // The same spelling first ("jn 3:16" finds "John 3:16"); only then
+            // a bookmark covering the same verses in the active translation
+            // ("Psalm 23:1-6" finds "Psalms 23").
+            match bookmarks.iter().position(|b| b.reference == label) {
+                Some(position) => position,
+                None => {
+                    let verses = load_active(paths)?;
+                    let index = VerseIndex::build(&verses);
+                    let wanted = index.resolve_all(&references)?;
+                    let same = |a: &[&Verse], b: &[&Verse]| {
+                        a.len() == b.len() && a.iter().zip(b).all(|(x, y)| std::ptr::eq(*x, *y))
+                    };
+                    bookmarks
+                        .iter()
+                        .position(|b| {
+                            parse_references(std::slice::from_ref(&b.reference))
+                                .and_then(|refs| index.resolve_all(&refs))
+                                .is_ok_and(|have| same(&have, &wanted))
+                        })
+                        .ok_or_else(|| anyhow::anyhow!("No bookmark for {}", label))?
+                }
+            }
         }
     };
 
@@ -1449,7 +1459,8 @@ pub fn run_tui(args: &TuiArgs, paths: &CachePaths) -> Result<()> {
 pub fn run_plan(args: &PlanArgs, paths: &CachePaths, output: &OutputStyle) -> Result<()> {
     match &args.action {
         PlanAction::List => {
-            let active = load_state(&paths.root);
+            // Listing still works when plan.json is unreadable.
+            let active = load_state(&paths.root).ok().flatten();
             println!("Available plans:");
             for p in all_plans() {
                 let marker = match &active {
@@ -1467,7 +1478,20 @@ pub fn run_plan(args: &PlanArgs, paths: &CachePaths, output: &OutputStyle) -> Re
             let plan = find_plan(&a.id)
                 .ok_or_else(|| anyhow::anyhow!("Unknown plan: {}. See `bible plan list`.", a.id))?;
             // Starting over used to silently wipe the active plan's progress.
-            if let Some(active) = load_state(&paths.root) {
+            let active = match load_state(&paths.root) {
+                Ok(active) => active,
+                Err(err) if a.force => {
+                    eprintln!("warning: replacing an unreadable plan file ({:#})", err);
+                    None
+                }
+                Err(err) => {
+                    return Err(err.context(format!(
+                        "Run `bible plan start {} --force` to replace it",
+                        plan.id
+                    )))
+                }
+            };
+            if let Some(active) = active {
                 if let Some(active_plan) = find_plan(&active.plan_id) {
                     let done = active.done_count(active_plan.days);
                     if done > 0 && !a.force {
@@ -1498,11 +1522,15 @@ pub fn run_plan(args: &PlanArgs, paths: &CachePaths, output: &OutputStyle) -> Re
         PlanAction::Undo(a) => run_plan_undo(a, paths),
         PlanAction::Status => run_plan_status(paths),
         PlanAction::Stop => {
-            match load_state(&paths.root) {
-                Some(state) if clear_state(&paths.root)? => {
-                    println!("Stopped {}.", state.plan_id)
+            // An unreadable plan file is stopped (removed) too.
+            let state = load_state(&paths.root);
+            if clear_state(&paths.root)? {
+                match state {
+                    Ok(Some(state)) => println!("Stopped {}.", state.plan_id),
+                    _ => println!("Stopped (the plan file was unreadable)."),
                 }
-                _ => println!("No active plan."),
+            } else {
+                println!("No active plan.");
             }
             Ok(())
         }
@@ -1511,7 +1539,7 @@ pub fn run_plan(args: &PlanArgs, paths: &CachePaths, output: &OutputStyle) -> Re
 
 /// Load the active plan state and its definition, or fail with a start hint.
 fn active_plan(paths: &CachePaths) -> Result<(PlanState, &'static PlanDef)> {
-    let state = load_state(&paths.root).ok_or_else(|| {
+    let state = load_state(&paths.root)?.ok_or_else(|| {
         anyhow::anyhow!("No active plan. Try: bible plan start nt-90 (see `bible plan list`)")
     })?;
     let plan = find_plan(&state.plan_id).ok_or_else(|| {

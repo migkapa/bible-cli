@@ -36,8 +36,7 @@ impl fmt::Display for ReferenceQuery {
         };
         write!(f, " {}", chapter)?;
         if !self.verse_list.is_empty() {
-            let list: Vec<String> = self.verse_list.iter().map(u16::to_string).collect();
-            return write!(f, ":{}", list.join(","));
+            return write!(f, ":{}", compress_runs(&self.verse_list));
         }
         match (self.verse, self.chapter_end, self.verse_end) {
             (None, Some(end_chapter), _) => write!(f, "-{}", end_chapter),
@@ -49,6 +48,50 @@ impl fmt::Display for ReferenceQuery {
             (None, None, _) => Ok(()),
         }
     }
+}
+
+/// `[16, 17, 18, 20]` -> `16-18,20`, which parses back to the same list.
+fn compress_runs(list: &[u16]) -> String {
+    let mut parts = Vec::new();
+    let mut i = 0;
+    while i < list.len() {
+        let start = list[i];
+        let mut end = start;
+        while i + 1 < list.len() && end.checked_add(1) == Some(list[i + 1]) {
+            i += 1;
+            end = list[i];
+        }
+        parts.push(if start == end {
+            start.to_string()
+        } else {
+            format!("{}-{}", start, end)
+        });
+        i += 1;
+    }
+    parts.join(",")
+}
+
+/// Format passages in the parser's own grammar, leaving out a book name
+/// repeated from the previous passage: `Genesis 1:1; 2:4; John 3:16`. This
+/// depends only on what was typed, never on a translation's versification.
+pub fn format_references(queries: &[ReferenceQuery]) -> String {
+    let mut out = String::new();
+    let mut prev_book: Option<&str> = None;
+    for query in queries {
+        if !out.is_empty() {
+            out.push_str("; ");
+        }
+        let full = query.to_string();
+        match (prev_book, query.chapter) {
+            // "Genesis 2:4" -> "2:4": a bare chapter continues the book.
+            (Some(book), Some(_)) if book == query.book => {
+                out.push_str(&full[query.book.len() + 1..])
+            }
+            _ => out.push_str(&full),
+        }
+        prev_book = Some(&query.book);
+    }
+    out
 }
 
 /// Parse one or more passages separated by `;`, e.g. `John 3:16; Romans 8:28`.
@@ -104,6 +147,35 @@ fn parse_passage(input: &str) -> Result<ReferenceQuery> {
     query.book = book.to_string();
     if !has_colon && is_single_chapter(book) {
         apply_single_chapter_shorthand(&mut query);
+    }
+    if query.chapter.is_none() && !query.verse_list.is_empty() {
+        // A bare list ("Jude 5,7") only makes sense for a one-chapter book.
+        if !is_single_chapter(book) {
+            bail!(
+                "A verse list needs a chapter, e.g. `{} 3:16,18` (separate chapters with ';')",
+                book
+            );
+        }
+        query.chapter = Some(1);
+    }
+    // One-chapter or one-verse "ranges" are just that chapter or verse.
+    if query.chapter_end.is_some() && query.chapter_end == query.chapter {
+        query.chapter_end = None;
+    }
+    if query.chapter_end.is_none() && query.verse_end.is_some() && query.verse_end == query.verse {
+        query.verse_end = None;
+    }
+
+    let has_zero = [
+        query.chapter,
+        query.chapter_end,
+        query.verse,
+        query.verse_end,
+    ]
+    .contains(&Some(0))
+        || query.verse_list.contains(&0);
+    if has_zero {
+        bail!("Chapter and verse numbers start at 1: {}", input.trim());
     }
     Ok(query)
 }
@@ -201,6 +273,13 @@ fn split_trailing_numbers(input: &str) -> Result<(String, ReferenceQuery)> {
     let mut query = ReferenceQuery::default();
     let mut book_len = n;
 
+    // "John 99999" is a number too big to be a chapter, not part of the name.
+    if let Some(last) = parts.last().filter(|_| n >= 2) {
+        if last.bytes().all(|b| b.is_ascii_digit()) && parse_u16(last).is_none() {
+            bail!("Number out of range: {}", last);
+        }
+    }
+
     if n >= 3 && parse_u16(parts[n - 2]).is_some() {
         if let Some(spec) = parse_verse_spec(parts[n - 1]) {
             // "John 3 16", "John 3 16-18", "John 3 16,18"
@@ -217,12 +296,19 @@ fn split_trailing_numbers(input: &str) -> Result<(String, ReferenceQuery)> {
             query.chapter = Some(chapter);
             book_len = n - 1;
         } else if let Some((first, end)) = parse_range(last) {
-            // "Genesis 1-3"
+            // "Genesis 1-3"; an equal end is collapsed later, after "Jude 1-1"
+            // has had the chance to mean a verse.
             if end < first {
                 bail!("Invalid chapter range: {}", last);
             }
             query.chapter = Some(first);
-            query.chapter_end = (end > first).then_some(end);
+            query.chapter_end = Some(end);
+            book_len = n - 1;
+        } else if let Some(spec) = parse_verse_spec(last).filter(|s| !s.list.is_empty()) {
+            // "Jude 5,7": a verse list with no chapter (valid for one-chapter
+            // books only; checked once the book is known).
+            query.verse = spec.verse;
+            query.verse_list = spec.list;
             book_len = n - 1;
         }
     }
@@ -502,6 +588,52 @@ mod tests {
     #[test]
     fn reversed_range_is_error() {
         assert!(err("John 3:18-16"));
+    }
+
+    #[test]
+    fn one_chapter_ranges_lists_and_number_bounds() {
+        // "Jude 1-1" is verse 1, just as "Jude 2-2" is verse 2.
+        let r = q("Jude 1-1");
+        assert_eq!((r.chapter, r.verse, r.verse_end), (Some(1), Some(1), None));
+        let r = q("Jude 2-2");
+        assert_eq!((r.chapter, r.verse, r.verse_end), (Some(1), Some(2), None));
+
+        // A bare verse list works for one-chapter books only.
+        let r = q("Jude 5,7");
+        assert_eq!((r.chapter, r.verse_list.clone()), (Some(1), vec![5, 7]));
+        assert_eq!(q("Philemon 6, 8").verse_list, vec![6, 8]);
+        assert!(err("Psalm 23,24"));
+
+        // Numbers start at 1 and must fit.
+        for bad in [
+            "John 0",
+            "John 3:0",
+            "John 0:1",
+            "John 3:0-2",
+            "Genesis 0-2",
+            "Jude 0",
+        ] {
+            assert!(err(bad), "accepted {}", bad);
+        }
+        let too_big = parse_reference(&["John 99999".to_string()]).unwrap_err();
+        assert_eq!(too_big.to_string(), "Number out of range: 99999");
+    }
+
+    #[test]
+    fn format_references_elides_repeated_books_and_round_trips() {
+        for (input, formatted) in [
+            ("Gen 1:1; 2:4; John 3:16", "Genesis 1:1; 2:4; John 3:16"),
+            ("jn 3:16,17,18,20", "John 3:16-18,20"),
+            ("Mark 9:43,45", "Mark 9:43,45"),
+            ("Psalm 23", "Psalms 23"),
+            ("Jude 5; 7", "Jude 1:5; 1:7"),
+            ("Jude; Romans 8", "Jude; Romans 8"),
+            ("John; John 3", "John; 3"),
+        ] {
+            let parsed = qs(input);
+            assert_eq!(format_references(&parsed), formatted, "{}", input);
+            assert_eq!(qs(formatted), parsed, "{} does not round-trip", formatted);
+        }
     }
 
     #[test]
