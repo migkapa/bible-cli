@@ -11,8 +11,9 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use crate::ai::{AiProvider, ChatMessage, ProviderRequest, StreamEvent};
 use crate::books::{is_old_testament, normalize_book, osis_code};
 use crate::cache::{
-    installed_translations, preload, read_manifest, remove_translation, save_default_translation,
-    CachePaths,
+    installed_translations, known_source, known_translation, known_translations,
+    load_default_translation, normalize_translation_id, preload, read_manifest, remove_translation,
+    save_default_translation, CachePaths, DEFAULT_TRANSLATION,
 };
 use crate::cli::{
     AiArgs, CacheArgs, DiffArgs, EchoArgs, ExportArgs, ExportTarget, MoodArgs, ParallelArgs,
@@ -108,11 +109,43 @@ fn human_size(bytes: u64) -> String {
 
 /// "Not cached" hint that names the translation and how to install it.
 fn missing_cache_msg(id: &str) -> String {
-    format!(
-        "{} not cached. Run `bible translation add {}` (or `bible cache --preload` for kjv).",
-        id.to_uppercase(),
-        id
-    )
+    if known_source(id).is_some() {
+        format!(
+            "{} not cached. Run `bible translation add {}`.",
+            id.to_uppercase(),
+            id
+        )
+    } else {
+        format!(
+            "{} not cached. Run `bible translation add {} --source <url-or-path>` (see `bible translation available`).",
+            id.to_uppercase(),
+            id
+        )
+    }
+}
+
+/// Parse a `--with kjv,bbe` list into normalized, de-duplicated translation ids.
+fn parse_translation_list(with: &str) -> Result<Vec<String>> {
+    let mut ids: Vec<String> = Vec::new();
+    for raw in with.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+        let id = normalize_translation_id(raw)?;
+        if !ids.contains(&id) {
+            ids.push(id);
+        }
+    }
+    Ok(ids)
+}
+
+/// Load each translation in `ids`, failing with an install hint for any missing.
+fn load_translations(paths: &CachePaths, ids: &[String]) -> Result<Vec<Vec<Verse>>> {
+    let mut loaded = Vec::with_capacity(ids.len());
+    for id in ids {
+        if !paths.is_installed(id) {
+            bail!("{}", missing_cache_msg(id));
+        }
+        loaded.push(load_verses(&paths.verses_path_for(id))?);
+    }
+    Ok(loaded)
 }
 
 pub fn run_read(args: &ReadArgs, paths: &CachePaths, output: &OutputStyle) -> Result<()> {
@@ -860,28 +893,13 @@ pub fn run_export(args: &ExportArgs, paths: &CachePaths, output: &OutputStyle) -
 pub fn run_parallel(args: &ParallelArgs, paths: &CachePaths, output: &OutputStyle) -> Result<()> {
     let reference = parse_reference(&args.reference)?;
 
-    let ids: Vec<String> = args
-        .with
-        .split(',')
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .collect();
+    let ids = parse_translation_list(&args.with)?;
     if ids.is_empty() {
         bail!("Provide translations to compare, e.g. --with kjv,bbe");
     }
 
     // Load every requested translation up front.
-    let mut loaded: Vec<Vec<Verse>> = Vec::with_capacity(ids.len());
-    for id in &ids {
-        if !paths.is_installed(id) {
-            bail!(
-                "{} is not installed. Run `bible translation add {}`.",
-                id.to_uppercase(),
-                id
-            );
-        }
-        loaded.push(load_verses(&paths.verses_path_for(id))?);
-    }
+    let loaded = load_translations(paths, &ids)?;
     let indexes: Vec<VerseIndex> = loaded.iter().map(|v| VerseIndex::build(v)).collect();
 
     // The first translation defines the versification we iterate over.
@@ -954,38 +972,76 @@ pub fn run_translation(args: &TranslationArgs, paths: &CachePaths) -> Result<()>
                 println!("No translations installed. Run `bible cache --preload`.");
                 return Ok(());
             }
+            let width = installed.iter().map(|t| t.id.len()).max().unwrap_or(0);
             for t in installed {
                 let marker = if t.id == paths.translation { "*" } else { " " };
-                let detail = t
+                let count = t
                     .manifest
                     .map(|m| format!("{} verses", m.verse_count))
                     .unwrap_or_default();
-                println!("{} {:<6} {}", marker, t.id, detail);
+                let name = known_translation(&t.id).map(|k| k.name).unwrap_or("");
+                let line = format!("{} {:<width$}  {:<12}  {}", marker, t.id, count, name);
+                println!("{}", line.trim_end());
+            }
+            Ok(())
+        }
+        TranslationAction::Available => {
+            println!("Install any of these with `bible translation add <id>`:");
+            let width = known_translations().iter().map(|t| t.id.len()).max();
+            let name_width = known_translations().iter().map(|t| t.name.len()).max();
+            for t in known_translations() {
+                let marker = if t.id == paths.translation { "*" } else { " " };
+                let status = if paths.is_installed(t.id) {
+                    "installed"
+                } else {
+                    ""
+                };
+                let line = format!(
+                    "{} {:<width$}  {:<name_width$}  {}",
+                    marker,
+                    t.id,
+                    t.name,
+                    status,
+                    width = width.unwrap_or(0),
+                    name_width = name_width.unwrap_or(0)
+                );
+                println!("{}", line.trim_end());
             }
             Ok(())
         }
         TranslationAction::Add(a) => {
-            let count = preload(paths, &a.id, a.source.as_deref())?;
-            println!("{} installed: {} verses", a.id.to_uppercase(), count);
+            let id = normalize_translation_id(&a.id)?;
+            let count = preload(paths, &id, a.source.as_deref())?;
+            println!("{} installed: {} verses", id.to_uppercase(), count);
             Ok(())
         }
         TranslationAction::Default(a) => {
-            if !paths.is_installed(&a.id) {
+            let id = normalize_translation_id(&a.id)?;
+            if !paths.is_installed(&id) {
                 bail!(
                     "{} is not installed. Run `bible translation add {}` first.",
-                    a.id.to_uppercase(),
-                    a.id
+                    id.to_uppercase(),
+                    id
                 );
             }
-            save_default_translation(&paths.root, &a.id)?;
-            println!("Default translation set to {}", a.id);
+            save_default_translation(&paths.root, Some(&id))?;
+            println!("Default translation set to {}", id);
             Ok(())
         }
         TranslationAction::Remove(a) => {
-            if remove_translation(paths, &a.id)? {
-                println!("Removed {}", a.id);
+            let id = normalize_translation_id(&a.id)?;
+            if remove_translation(paths, &id)? {
+                println!("Removed {}", id);
+                // Don't leave the config pointing at a translation that is gone.
+                if load_default_translation(&paths.root).as_deref() == Some(id.as_str()) {
+                    save_default_translation(&paths.root, None)?;
+                    println!(
+                        "{} was the default translation; the default is now {}.",
+                        id, DEFAULT_TRANSLATION
+                    );
+                }
             } else {
-                println!("{} was not installed", a.id);
+                println!("{} was not installed", id);
             }
             Ok(())
         }
@@ -1266,33 +1322,16 @@ fn diff_tokens<'a>(base: &[&'a str], other: &[&'a str]) -> Vec<DiffOp<'a>> {
 pub fn run_diff(args: &DiffArgs, paths: &CachePaths, output: &OutputStyle) -> Result<()> {
     let reference = parse_reference(&args.reference)?;
 
-    let mut ids: Vec<String> = args
-        .with
-        .split(',')
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .collect();
+    let mut ids = parse_translation_list(&args.with)?;
     // A single id is diffed against the active translation.
-    if ids.len() == 1 {
+    if ids.len() == 1 && ids[0] != paths.translation {
         ids.insert(0, paths.translation.clone());
     }
-    let mut seen = std::collections::HashSet::new();
-    ids.retain(|id| seen.insert(id.clone()));
     if ids.len() < 2 {
         bail!("Provide at least two distinct translations, e.g. --with kjv,bbe");
     }
 
-    let mut loaded: Vec<Vec<Verse>> = Vec::with_capacity(ids.len());
-    for id in &ids {
-        if !paths.is_installed(id) {
-            bail!(
-                "{} is not installed. Run `bible translation add {}`.",
-                id.to_uppercase(),
-                id
-            );
-        }
-        loaded.push(load_verses(&paths.verses_path_for(id))?);
-    }
+    let loaded = load_translations(paths, &ids)?;
     let indexes: Vec<VerseIndex> = loaded.iter().map(|v| VerseIndex::build(v)).collect();
 
     // The first translation is the base; it defines versification and word order.

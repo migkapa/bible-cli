@@ -23,7 +23,8 @@ pub struct VerseRef {
 }
 
 pub fn load_verses(path: &Path) -> Result<Vec<Verse>> {
-    let file = File::open(path).with_context(|| format!("KJV not found at {}", path.display()))?;
+    let file =
+        File::open(path).with_context(|| format!("Translation not found at {}", path.display()))?;
     let reader = BufReader::new(file);
     let mut verses = Vec::new();
     for (idx, line) in reader.lines().enumerate() {
@@ -36,7 +37,7 @@ pub fn load_verses(path: &Path) -> Result<Vec<Verse>> {
         verses.push(verse);
     }
     if verses.is_empty() {
-        bail!("KJV cache is empty at {}", path.display());
+        bail!("Translation cache is empty at {}", path.display());
     }
     Ok(verses)
 }

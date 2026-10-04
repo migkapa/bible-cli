@@ -185,6 +185,8 @@ pub struct TranslationArgs {
 pub enum TranslationAction {
     /// List installed translations.
     List,
+    /// List built-in translations that install by id alone.
+    Available,
     /// Download and install a translation.
     Add(TranslationAddArgs),
     /// Set the default translation.

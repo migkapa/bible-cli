@@ -33,11 +33,23 @@ async fn main() -> Result<()> {
         .data_dir
         .clone()
         .unwrap_or_else(cache::default_cache_root);
-    let translation = cli
-        .translation
-        .clone()
-        .or_else(|| cache::load_default_translation(&root))
-        .unwrap_or_else(|| cache::DEFAULT_TRANSLATION.to_string());
+    let translation = match cli.translation.as_deref() {
+        Some(id) => cache::normalize_translation_id(id)?,
+        None => cache::load_default_translation(&root)
+            .and_then(|id| match cache::normalize_translation_id(&id) {
+                Ok(id) => Some(id),
+                Err(_) => {
+                    // A hand-edited config must not lock the user out of
+                    // `bible translation default <id>`, which repairs it.
+                    eprintln!(
+                        "warning: ignoring invalid default translation '{}' in config.json",
+                        id
+                    );
+                    None
+                }
+            })
+            .unwrap_or_else(|| cache::DEFAULT_TRANSLATION.to_string()),
+    };
     let paths = cache::CachePaths::new(root, translation);
     let output = output::OutputStyle::new(cli.color, cli.resolved_format());
 

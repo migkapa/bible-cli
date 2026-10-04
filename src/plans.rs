@@ -4,6 +4,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use crate::books::{BOOKS, OT_BOOK_COUNT};
+use crate::cache::write_atomic;
 use crate::verses::{max_chapter, Verse};
 
 /// A built-in reading plan: a run of chapters spread over a fixed number of days.
@@ -189,7 +190,7 @@ pub fn load_state(root: &Path) -> Option<PlanState> {
 pub fn save_state(root: &Path, state: &PlanState) -> Result<()> {
     fs::create_dir_all(root).with_context(|| format!("Failed creating {}", root.display()))?;
     let raw = serde_json::to_string_pretty(state)?;
-    fs::write(state_path(root), raw).context("Failed writing plan state")?;
+    write_atomic(&state_path(root), raw.as_bytes()).context("Failed writing plan state")?;
     Ok(())
 }
 
