@@ -1,6 +1,6 @@
 [package]
 name = "bible-cli"
-version = "0.6.0"
+version = "0.7.0"
 edition = "2021"
 rust-version = "1.85"
 description = "Fast, playful Bible CLI: read, search, compare, and memorize scripture in your terminal."
