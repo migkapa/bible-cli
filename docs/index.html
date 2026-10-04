@@ -7,7 +7,7 @@
     <!-- Primary Meta Tags -->
     <title>bible-cli - Fast Bible CLI for Your Terminal | Read, Search & AI Reflections</title>
     <meta name="title" content="bible-cli - Fast Bible CLI for Your Terminal | Read, Search & AI Reflections">
-    <meta name="description" content="A fast, playful Bible command-line tool built in Rust. Read KJV Scripture, search verses, get daily readings, and explore passages with AI-powered reflections using OpenAI or Anthropic.">
+    <meta name="description" content="A fast, playful Bible command-line tool built in Rust. Read the KJV and other public-domain translations, search and compare verses, memorize passages, follow reading plans, and explore Scripture with AI reflections using OpenAI or Anthropic.">
     <meta name="keywords" content="bible cli, command line bible, terminal bible, kjv bible, rust cli, bible search, daily verse, ai bible, scripture terminal, bible app developers">
     <meta name="author" content="migkapa">
     <meta name="robots" content="index, follow">
@@ -38,7 +38,7 @@
         "name": "bible-cli",
         "applicationCategory": "DeveloperApplication",
         "operatingSystem": "Windows, macOS, Linux",
-        "description": "A fast, playful Bible command-line tool built in Rust. Read KJV Scripture, search verses, get daily readings, and explore passages with AI-powered reflections.",
+        "description": "A fast, playful Bible command-line tool built in Rust. Read and compare public-domain translations, search verses, memorize passages, follow reading plans, and explore passages with AI-powered reflections.",
         "url": "https://migkapa.github.io/bible-cli/",
         "downloadUrl": "https://crates.io/crates/bible-cli",
         "softwareVersion": "0.3.0",
@@ -423,11 +423,19 @@
                 <div class="feature-grid">
                     <article class="feature">
                         <h3>Read Scripture</h3>
-                        <p>Quick access to any verse, chapter, or book in the King James Version Bible.</p>
+                        <p>Verses, ranges, chapters, or whole passage lists like "Gen 1:1-3; John 1:1", in the KJV and six more public-domain translations.</p>
                     </article>
                     <article class="feature">
                         <h3>Smart Search</h3>
-                        <p>Find verses by keyword with optional book filtering and customizable result limits.</p>
+                        <p>Find verses by phrase, whole word, or regex, with highlighted matches and book or testament filters.</p>
+                    </article>
+                    <article class="feature">
+                        <h3>Memorize</h3>
+                        <p>Hide more of a passage at each level, down to first letters, then quiz yourself with word-by-word scoring.</p>
+                    </article>
+                    <article class="feature">
+                        <h3>Bookmarks &amp; Notes</h3>
+                        <p>Save passages with notes and tags, and read them back in whichever translation you like.</p>
                     </article>
                     <article class="feature">
                         <h3>Daily Verse</h3>
@@ -524,7 +532,7 @@
                         <div class="terminal-dot green"></div>
                     </div>
                     <div class="terminal-body">
-<span class="output">┌─ Books ─────────┬─ John 3 ──────────────────────────────────────┐</span>
+<span class="output">┌─ Books ─────────┬─ John 3 · KJV ────────────────────────────────┐</span>
 <span class="output">│</span> <span class="highlight">> Genesis</span>       <span class="output">│</span>                                               <span class="output">│</span>
 <span class="output">│</span>   Exodus        <span class="output">│</span>  <span class="cyan">1</span>  <span class="output">There was a man of the Pharisees, named</span>   <span class="output">│</span>
 <span class="output">│</span>   Leviticus     <span class="output">│</span>     <span class="output">Nicodemus, a ruler of the Jews:</span>           <span class="output">│</span>
@@ -537,10 +545,10 @@
 <span class="output">├─────────────────┤</span>                                               <span class="output">│</span>
 <span class="output">│</span> <span class="cyan">Ch 3/21</span> <span class="output">[n/p]</span>   <span class="output">│</span>                                               <span class="output">│</span>
 <span class="output">└─────────────────┴───────────────────────────────────────────────┘</span>
- <span class="cyan">[READER]</span>  <span class="output">j/k:scroll  n/p:chapter  Tab:books  g/G:top/bottom  q:quit</span>
+ <span class="cyan">[READER]</span>  <span class="output">j/k:scroll  n/p:chapter  ::go to  g/G:top/bottom  Tab:books  q:quit</span>
                     </div>
                 </div>
-                <p style="text-align: center; color: var(--text-muted); margin-top: 24px; font-size: 0.9rem;">Launch with <code style="color: var(--accent);">bible tui</code> or <code style="color: var(--accent);">bible tui --book John</code></p>
+                <p style="text-align: center; color: var(--text-muted); margin-top: 24px; font-size: 0.9rem;">Launch with <code style="color: var(--accent);">bible tui</code> or <code style="color: var(--accent);">bible tui --ref "John 3:16"</code>, and press <code style="color: var(--accent);">:</code> to jump anywhere</p>
             </div>
         </section>
 
@@ -549,12 +557,12 @@
                 <h2 id="commands-heading">Command Reference</h2>
                 <div class="command-list" role="list">
                     <div class="command-item" role="listitem">
-                        <code>bible read &lt;book&gt; [chapter] [verse]</code>
-                        <span>Read a specific verse, chapter, or book overview</span>
+                        <code>bible read &lt;reference&gt;</code>
+                        <span>Read a verse, range, chapter, or passage list (John 3:16-18; Ps 23)</span>
                     </div>
                     <div class="command-item" role="listitem">
-                        <code>bible search &lt;query&gt;</code>
-                        <span>Search for verses containing a keyword</span>
+                        <code>bible search &lt;words&gt;</code>
+                        <span>Search for verses, with highlighted matches</span>
                     </div>
                     <div class="command-item" role="listitem">
                         <code>bible today</code>
@@ -569,6 +577,14 @@
                         <span>Find verses for peace, courage, wisdom, hope, or gratitude</span>
                     </div>
                     <div class="command-item" role="listitem">
+                        <code>bible memorize &lt;ref&gt; --quiz</code>
+                        <span>Practice a passage level by level, then recite it and get scored</span>
+                    </div>
+                    <div class="command-item" role="listitem">
+                        <code>bible bookmark add &lt;ref&gt;</code>
+                        <span>Save passages with notes (--note) and tags (--tag)</span>
+                    </div>
+                    <div class="command-item" role="listitem">
                         <code>bible plan start nt-90</code>
                         <span>Follow a reading plan — Bible in a year, NT in 90 days, and more</span>
                     </div>
@@ -581,8 +597,8 @@
                         <span>Start an AI-powered conversation about a passage</span>
                     </div>
                     <div class="command-item" role="listitem">
-                        <code>bible cache --preload</code>
-                        <span>Download and cache the KJV Bible locally</span>
+                        <code>bible translation add asv</code>
+                        <span>Install another translation (asv, ylt, nheb, webster, geneva, bbe)</span>
                     </div>
                     <div class="command-item" role="listitem">
                         <code>bible tui</code>
